@@ -422,20 +422,37 @@ export function TeamServerView({
                 </div>
               </div>
 
-              <div className="bg-slate-50 border border-slate-200 p-3 text-xs space-y-1.5">
-                <div className="font-semibold text-slate-800">How to Host This Device as a Local Team Server:</div>
-                <ol className="list-decimal list-inside space-y-1 text-slate-600">
-                  <li>
-                    Connect this host computer and your team devices to the same Wi-Fi or router.
-                  </li>
-                  <li>
-                    Run <code className="bg-white border border-slate-200 px-1 py-0.5 font-mono text-[11px]">npm run dev</code> (or <code className="bg-white border border-slate-200 px-1 py-0.5 font-mono text-[11px]">npm run build && npx tsx server.ts</code>) on this device. It listens on <code className="font-mono text-[11px]">0.0.0.0:3000</code>.
-                  </li>
-                  <li>
-                    Have teammates open the LAN IP URL (or scan the QR code) in their browser — every edit saves directly to this device&apos;s SQLite database and syncs live.
-                  </li>
-                </ol>
-              </div>
+              {serverInfo?.runtime === 'netlify' ? (
+                <div className="bg-emerald-50 border border-emerald-200 p-3 text-xs space-y-1.5">
+                  <div className="font-semibold text-emerald-950">Netlify Cloud Serverless Hosting Active:</div>
+                  <ol className="list-decimal list-inside space-y-1 text-emerald-900">
+                    <li>
+                      Your POS database is persisted via <strong>Netlify Blobs</strong> and served over HTTPS from <code className="bg-white border border-emerald-200 px-1 py-0.5 font-mono text-[11px]">{browserOrigin}</code>.
+                    </li>
+                    <li>
+                      Share the URL or QR code with any teammate anywhere — edits sync automatically across devices every few seconds.
+                    </li>
+                    <li>
+                      Use <strong>Install App</strong> (or Safari &ldquo;Add to Home Screen&rdquo;) to install this POS directly onto phones, tablets, or desktops.
+                    </li>
+                  </ol>
+                </div>
+              ) : (
+                <div className="bg-slate-50 border border-slate-200 p-3 text-xs space-y-1.5">
+                  <div className="font-semibold text-slate-800">How to Host This Device as a Local Team Server:</div>
+                  <ol className="list-decimal list-inside space-y-1 text-slate-600">
+                    <li>
+                      Connect this host computer and your team devices to the same Wi-Fi or router.
+                    </li>
+                    <li>
+                      Run <code className="bg-white border border-slate-200 px-1 py-0.5 font-mono text-[11px]">npm run dev</code> (or <code className="bg-white border border-slate-200 px-1 py-0.5 font-mono text-[11px]">npm run build && npx tsx server.ts</code>) on this device. It listens on <code className="font-mono text-[11px]">0.0.0.0:3000</code>.
+                    </li>
+                    <li>
+                      Have teammates open the LAN IP URL (or scan the QR code) in their browser — every edit saves directly to this device&apos;s SQLite database and syncs live.
+                    </li>
+                  </ol>
+                </div>
+              )}
             </div>
 
             <div className="md:col-span-4 flex flex-col items-center justify-center border border-slate-200 bg-slate-50 p-3 text-center">

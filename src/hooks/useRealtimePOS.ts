@@ -44,6 +44,7 @@ export function useRealtimePOS(
   const [loading, setLoading] = useState(true);
   const [wsStatus, setWsStatus] = useState<WsStatus>('connecting');
   const [lastSyncAt, setLastSyncAt] = useState<string>('');
+  const [realtimeMode, setRealtimeMode] = useState<'ws' | 'polling' | null>(null);
 
   const presenceRef = useRef({ operator, activeView, editingKey });
   presenceRef.current = { operator, activeView, editingKey };
@@ -97,6 +98,9 @@ export function useRealtimePOS(
         const srv = (await srvRes.json()) as ServerInfo;
         setServerInfo(srv);
         if (srv.onlineMembers) setOnlineMembers(srv.onlineMembers);
+        if (srv.realtimeMode) {
+          setRealtimeMode((prev) => prev ?? srv.realtimeMode ?? 'ws');
+        }
       }
       if (savesRes.ok) setServerSaves(await savesRes.json());
       if (usersRes.ok) setServerUsers(await usersRes.json());
@@ -199,7 +203,7 @@ export function useRealtimePOS(
       if (dashData) setDashboard(dashData);
       setLastSyncAt(new Date().toISOString());
     } catch {
-      // Ignore transient network errors; next WS event or manual refresh will sync
+      // Ignore transient network errors; next sync will refresh
     }
   }, []);
 
@@ -207,28 +211,67 @@ export function useRealtimePOS(
   const reconnectTimerRef = useRef<number | null>(null);
   const prevProfileKeyRef = useRef<string>('');
 
-  const sendPresence = useCallback((forceSyncProfile = false) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const { operator: op, activeView: view, editingKey: editKey } = presenceRef.current;
-    const profileKey = `${op.clientId}|${op.name}|${op.role}|${op.color}`;
-    const changed = Boolean(prevProfileKeyRef.current && prevProfileKeyRef.current !== profileKey);
-    prevProfileKeyRef.current = profileKey;
+  const sendPresenceHttp = useCallback(async (forceSyncProfile = false) => {
+    try {
+      const { operator: op, activeView: view, editingKey: editKey } = presenceRef.current;
+      const profileKey = `${op.clientId}|${op.name}|${op.role}|${op.color}`;
+      const changed = Boolean(prevProfileKeyRef.current && prevProfileKeyRef.current !== profileKey);
+      prevProfileKeyRef.current = profileKey;
 
-    ws.send(
-      JSON.stringify({
-        kind: 'presence',
-        clientId: op.clientId,
-        serverUserId: op.serverUserId ?? null,
-        name: op.name,
-        role: op.role,
-        color: op.color,
-        syncProfile: forceSyncProfile || changed,
-        activeView: view,
-        editingKey: editKey,
-      })
-    );
+      const res = await fetch('/api/presence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId: op.clientId,
+          serverUserId: op.serverUserId ?? null,
+          name: op.name,
+          role: op.role,
+          color: op.color,
+          syncProfile: forceSyncProfile || changed,
+          activeView: view,
+          editingKey: editKey,
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { members?: PresenceMember[]; serverUsers?: ServerUser[] };
+        if (data.members) setOnlineMembers(data.members);
+        if (data.serverUsers) setServerUsers(data.serverUsers);
+        setWsStatus('connected');
+      }
+    } catch {
+      // ignore transient polling presence errors
+    }
   }, []);
+
+  const sendPresence = useCallback(
+    (forceSyncProfile = false) => {
+      if (realtimeMode === 'polling') {
+        void sendPresenceHttp(forceSyncProfile);
+        return;
+      }
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const { operator: op, activeView: view, editingKey: editKey } = presenceRef.current;
+      const profileKey = `${op.clientId}|${op.name}|${op.role}|${op.color}`;
+      const changed = Boolean(prevProfileKeyRef.current && prevProfileKeyRef.current !== profileKey);
+      prevProfileKeyRef.current = profileKey;
+
+      ws.send(
+        JSON.stringify({
+          kind: 'presence',
+          clientId: op.clientId,
+          serverUserId: op.serverUserId ?? null,
+          name: op.name,
+          role: op.role,
+          color: op.color,
+          syncProfile: forceSyncProfile || changed,
+          activeView: view,
+          editingKey: editKey,
+        })
+      );
+    },
+    [realtimeMode, sendPresenceHttp]
+  );
 
   useEffect(() => {
     fetchAll();
@@ -239,7 +282,46 @@ export function useRealtimePOS(
   }, [operator.clientId, operator.serverUserId, operator.name, operator.role, operator.color, activeView, editingKey, sendPresence]);
 
   useEffect(() => {
+    if (!realtimeMode) return;
+
     let unmounted = false;
+
+    if (realtimeMode === 'polling') {
+      setWsStatus('connected');
+      void sendPresenceHttp(false);
+
+      const syncTimer = window.setInterval(() => {
+        if (!unmounted && !document.hidden) {
+          void fetchAll();
+        }
+      }, 10000);
+
+      const presenceTimer = window.setInterval(() => {
+        if (!unmounted && !document.hidden) {
+          void sendPresenceHttp(false);
+        }
+      }, 20000);
+
+      const handleWake = () => {
+        if (unmounted || document.hidden) return;
+        void sendPresenceHttp(false);
+        void fetchAll();
+      };
+
+      document.addEventListener('visibilitychange', handleWake);
+      window.addEventListener('pageshow', handleWake);
+      window.addEventListener('online', handleWake);
+
+      return () => {
+        unmounted = true;
+        clearInterval(syncTimer);
+        clearInterval(presenceTimer);
+        document.removeEventListener('visibilitychange', handleWake);
+        window.removeEventListener('pageshow', handleWake);
+        window.removeEventListener('online', handleWake);
+      };
+    }
+
     let heartbeatTimer: number | null = null;
 
     const connect = () => {
@@ -350,7 +432,7 @@ export function useRealtimePOS(
       window.removeEventListener('online', handleWake);
       wsRef.current?.close();
     };
-  }, [fetchAll, fetchScope, sendPresence]);
+  }, [realtimeMode, fetchAll, fetchScope, sendPresence, sendPresenceHttp]);
 
   return {
     dashboard,
@@ -374,4 +456,3 @@ export function useRealtimePOS(
     refresh: fetchAll,
   };
 }
-

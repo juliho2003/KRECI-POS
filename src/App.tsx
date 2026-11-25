@@ -25,6 +25,7 @@ import { DashboardView } from './components/DashboardView';
 import { InventoryView } from './components/InventoryView';
 import { PosTerminalView } from './components/PosTerminalView';
 import { PrintableFormModal, type PrintablePayload } from './components/PrintableFormModal';
+import { OfflineIndicator, PWAInstallButton } from './components/PWAInstallButton';
 import { QuotesView } from './components/QuotesView';
 import { RentalsView } from './components/RentalsView';
 import { SlipsAndFinanceView } from './components/SlipsAndFinanceView';
@@ -400,7 +401,9 @@ export default function App() {
               />
               <span>
                 {wsStatus === 'connected'
-                  ? 'Server Sync Active'
+                  ? serverInfo?.runtime === 'netlify'
+                    ? 'Cloud Sync Active'
+                    : 'Server Sync Active'
                   : wsStatus === 'connecting'
                     ? 'Connecting Sync...'
                     : 'Sync Disconnected'}
@@ -416,7 +419,7 @@ export default function App() {
             </button>
           </div>
           <div className="text-[11px] text-slate-500">
-            KULTURE REVIVAL EVENTS CORE, INC. · SQLite Persisted
+            KULTURE REVIVAL EVENTS CORE, INC. · {serverInfo?.runtime === 'netlify' ? 'Netlify Cloud Persisted' : 'SQLite Persisted'}
           </div>
           {serverInfo?.lastManualSaveAt && (
             <div className="text-[10px] text-emerald-400/90 truncate" title={`Saved by ${serverInfo.lastManualSaveBy}`}>
@@ -537,6 +540,8 @@ export default function App() {
                 <span className="hidden sm:inline">Share Server</span>
               </button>
             )}
+
+            <PWAInstallButton />
 
             {activeView !== 'pos' && (
               <button
@@ -971,6 +976,7 @@ export default function App() {
         businesses={businesses}
         onClose={() => setPrintPayload(null)}
       />
+      <OfflineIndicator />
     </div>
   );
 }

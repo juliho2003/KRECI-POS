@@ -1,7 +1,8 @@
-import Database from 'better-sqlite3';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { SEED_INVENTORY } from './seedInventory.ts';
+import type { DbDriver } from './sqliteAdapter.ts';
 import type {
   ActivityLogEntry,
   BudgetItem,
@@ -27,15 +28,18 @@ import type {
   SharedDraft,
 } from '../src/types.ts';
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+let db!: DbDriver;
+
+export function setDatabaseDriver(driver: DbDriver): void {
+  db = driver;
 }
 
-const DB_PATH = path.join(DATA_DIR, 'kr_oncue.db');
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+export function getDatabaseDriver(): DbDriver {
+  if (!db) {
+    throw new Error('Database driver has not been initialized');
+  }
+  return db;
+}
 
 export function initDatabase(): void {
   db.exec(`
@@ -334,6 +338,8 @@ export function initDatabase(): void {
   ensureColumn('rentals', 'is_internal', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn('payments', 'business_id', "TEXT NOT NULL DEFAULT 'kr-oncue'");
   ensureColumn('shared_drafts', 'business_id', "TEXT NOT NULL DEFAULT 'kr-oncue'");
+  ensureColumn('server_users', 'active_view', "TEXT NOT NULL DEFAULT 'pos'");
+  ensureColumn('server_users', 'editing_key', 'TEXT');
 
   const nowInit = new Date().toISOString();
   db.prepare(
@@ -2588,22 +2594,23 @@ export function updateServerSettings(patch: {
 }
 
 export function getDatabaseStats() {
-  let dbSizeBytes = 0;
+  const dbPath = db.getDbPath();
+  const dbSizeBytes = db.getSizeBytes();
   let lastSavedAt = new Date().toISOString();
-  try {
-    db.pragma('wal_checkpoint(PASSIVE)');
-    const st = fs.statSync(DB_PATH);
-    dbSizeBytes = st.size;
-    lastSavedAt = st.mtime.toISOString();
-  } catch {
-    // ignore stat errors
+  if (!db.isServerless) {
+    try {
+      const st = fs.statSync(dbPath);
+      lastSavedAt = st.mtime.toISOString();
+    } catch {
+      // ignore stat errors
+    }
   }
 
   const countOf = (table: string) =>
     Number((db.prepare(`SELECT COUNT(*) as cnt FROM ${table}`).get() as { cnt: number }).cnt);
 
   return {
-    dbPath: DB_PATH,
+    dbPath,
     dbSizeBytes,
     lastSavedAt,
     counts: {
@@ -2684,8 +2691,16 @@ export function saveServerCheckpoint(actorName: string, label?: string): ServerS
 
   // Flush WAL into main SQLite DB file and write latest snapshot file on host disk
   db.pragma('wal_checkpoint(TRUNCATE)');
-  const latestFile = path.join(DATA_DIR, 'kr_oncue_latest_save.json');
-  fs.writeFileSync(latestFile, payloadJson, 'utf8');
+  const targetDir = db.isServerless ? os.tmpdir() : path.dirname(db.getDbPath());
+  try {
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    const latestFile = path.join(targetDir, 'kr_oncue_latest_save.json');
+    fs.writeFileSync(latestFile, payloadJson, 'utf8');
+  } catch {
+    // ignore non-critical local checkpoint file write failures in read-only environments
+  }
 
   return {
     id: Number(res.lastInsertRowid),
@@ -2815,6 +2830,8 @@ function mapServerUserRow(r: Record<string, unknown>): ServerUser {
     addedBy: String(r.added_by ?? 'Host'),
     lastSeenAt: String(r.last_seen_at),
     createdAt: String(r.created_at),
+    activeView: r.active_view ? String(r.active_view) : undefined,
+    editingKey: r.editing_key ? String(r.editing_key) : null,
   };
 }
 
@@ -2950,23 +2967,37 @@ export function touchServerUserPresence(input: {
   role: string;
   color: string;
   syncProfile?: boolean;
+  activeView?: string;
+  editingKey?: string | null;
 }): ServerUser {
   const now = new Date().toISOString();
   let user = input.serverUserId ? getServerUserById(input.serverUserId) : undefined;
   if (!user && input.clientId) {
     user = getServerUserByClientId(input.clientId);
   }
+  const activeView = input.activeView ?? user?.activeView ?? 'pos';
+  const editingKey = input.editingKey !== undefined ? input.editingKey : (user?.editingKey ?? null);
+
   if (user) {
     if (input.syncProfile) {
-      db.prepare('UPDATE server_users SET last_seen_at = ?, name = ?, role = ?, color = ? WHERE id = ?').run(
+      db.prepare(
+        'UPDATE server_users SET last_seen_at = ?, name = ?, role = ?, color = ?, active_view = ?, editing_key = ? WHERE id = ?'
+      ).run(
         now,
         input.name.trim() || user.name,
         input.role.trim() || user.role,
         input.color || user.color,
+        activeView,
+        editingKey,
         user.id
       );
     } else {
-      db.prepare('UPDATE server_users SET last_seen_at = ? WHERE id = ?').run(now, user.id);
+      db.prepare('UPDATE server_users SET last_seen_at = ?, active_view = ?, editing_key = ? WHERE id = ?').run(
+        now,
+        activeView,
+        editingKey,
+        user.id
+      );
     }
     return getServerUserById(user.id)!;
   }
@@ -2977,8 +3008,8 @@ export function touchServerUserPresence(input: {
     .prepare(`
       INSERT INTO server_users (
         client_id, name, email, role, color, access_level, can_edit, status,
-        invite_token, added_by, last_seen_at, created_at
-      ) VALUES (?, ?, '', ?, ?, 'EDITOR', 1, 'ACTIVE', ?, 'Shared Web Link', ?, ?)
+        invite_token, added_by, last_seen_at, created_at, active_view, editing_key
+      ) VALUES (?, ?, '', ?, ?, 'EDITOR', 1, 'ACTIVE', ?, 'Shared Web Link', ?, ?, ?, ?)
     `)
     .run(
       input.clientId,
@@ -2987,7 +3018,9 @@ export function touchServerUserPresence(input: {
       input.color || '#0284c7',
       inviteToken,
       now,
-      now
+      now,
+      activeView,
+      editingKey
     );
   return getServerUserById(Number(res.lastInsertRowid))!;
 }

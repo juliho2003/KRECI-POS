@@ -385,6 +385,8 @@ export interface ServerSavepoint {
 
 export interface ServerInfo {
   serverLabel: string;
+  runtime?: 'node' | 'netlify';
+  realtimeMode?: 'ws' | 'polling';
   hostname: string;
   port: number;
   platform: string;
