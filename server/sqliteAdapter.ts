@@ -71,9 +71,15 @@ function normalizeSqlJsParams(sql: string, params: unknown[]): Record<string, st
   return params.map(sanitizeSqlValue);
 }
 
+export interface SqlJsDriverOptions {
+  isServerless?: boolean;
+  onWrite?: (driver: DbDriver) => void;
+}
+
 export async function createSqlJsDriver(
   initialBytes?: Uint8Array | null,
-  dbPathLabel = 'netlify-blobs://kr-oncue-pos/kr_oncue.sqlite'
+  dbPathLabel = 'netlify-blobs://kr-oncue-pos/kr_oncue.sqlite',
+  options?: SqlJsDriverOptions
 ): Promise<DbDriver> {
   const sqlModule = await import('sql.js/dist/sql-wasm-inline.js');
   const initSqlJs = (sqlModule.default || sqlModule) as () => Promise<{
@@ -83,17 +89,26 @@ export async function createSqlJsDriver(
   const sqlDb = initialBytes && initialBytes.byteLength > 0 ? new SQL.Database(initialBytes) : new SQL.Database();
   let txDepth = 0;
 
-  return {
-    isServerless: true,
+  const driver: DbDriver = {
+    isServerless: options?.isServerless ?? true,
 
     exec(sql: string) {
       sqlDb.exec(sql);
+      if (txDepth === 0) {
+        options?.onWrite?.(driver);
+      }
     },
 
     pragma(pragmaStatement: string) {
       const clean = pragmaStatement.trim();
       if (!clean) return;
-      if (/^journal_mode\s*=/i.test(clean) || /^wal_checkpoint/i.test(clean)) {
+      if (/^journal_mode\s*=/i.test(clean)) {
+        return;
+      }
+      if (/^wal_checkpoint/i.test(clean)) {
+        if (txDepth === 0) {
+          options?.onWrite?.(driver);
+        }
         return;
       }
       sqlDb.exec(`PRAGMA ${clean};`);
@@ -136,6 +151,9 @@ export async function createSqlJsDriver(
           const changes = sqlDb.getRowsModified();
           const idRes = sqlDb.exec('SELECT last_insert_rowid() AS id');
           const lastInsertRowid = Number(idRes[0]?.values?.[0]?.[0] ?? 0);
+          if (txDepth === 0) {
+            options?.onWrite?.(driver);
+          }
           return { changes, lastInsertRowid };
         },
       };
@@ -155,6 +173,7 @@ export async function createSqlJsDriver(
           txDepth -= 1;
           if (txDepth === 0) {
             sqlDb.exec('COMMIT');
+            options?.onWrite?.(driver);
           } else {
             sqlDb.exec(`RELEASE SAVEPOINT ${sp}`);
           }
@@ -200,4 +219,6 @@ export async function createSqlJsDriver(
       return dbPathLabel;
     },
   };
+
+  return driver;
 }

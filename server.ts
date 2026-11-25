@@ -31,7 +31,7 @@ function getLanUrls(port: number): string[] {
 }
 
 async function startServer() {
-  setDatabaseDriver(createNodeSqliteDriver());
+  setDatabaseDriver(await createNodeSqliteDriver());
   initDatabase();
 
   const presenceMap = new Map<WebSocket, PresenceMember>();
