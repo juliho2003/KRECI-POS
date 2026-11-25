@@ -35,10 +35,7 @@ import type { EquipmentCategoryCode, ServerUser } from './types';
 import {
   apiFetch,
   getOperatorProfile,
-  getStoredTeamPin,
-  registerPinPromptHandler,
   saveOperatorProfile,
-  setStoredTeamPin,
   type OperatorProfile,
 } from './utils/api';
 import { formatPeso } from './utils/format';
@@ -72,16 +69,19 @@ export default function App() {
   const [operator, setOperator] = useState<OperatorProfile>(() => getOperatorProfile());
   const [editingKey, setEditingKey] = useState<string | null>(null);
 
-  // Operator Profile modal state
+  // Operator / Team Member Identity modal state
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [profileMode, setProfileMode] = useState<'create' | 'edit'>('create');
   const [opNameInput, setOpNameInput] = useState(operator.name);
   const [opRoleInput, setOpRoleInput] = useState(operator.role);
   const [opColorInput, setOpColorInput] = useState(operator.color);
+  const [savingProfile, setSavingProfile] = useState(false);
 
-  // Team Edit PIN prompt modal state
-  const [showPinModal, setShowPinModal] = useState(false);
-  const [pinInput, setPinInput] = useState(() => getStoredTeamPin());
-  const [verifyingPin, setVerifyingPin] = useState(false);
+  // Server Save PIN (2022) modal state
+  const [showSavePinModal, setShowSavePinModal] = useState(false);
+  const [savePinInput, setSavePinInput] = useState('');
+  const [savePinError, setSavePinError] = useState('');
+  const [pendingSaveLabel, setPendingSaveLabel] = useState<string | undefined>(undefined);
   const [savingToServer, setSavingToServer] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
 
@@ -107,10 +107,13 @@ export default function App() {
   } = useRealtimePOS(operator, activeView, editingKey);
 
   const currentServerUser = serverUsers.find(
-    (u) => (operator.serverUserId ? u.id === operator.serverUserId : false) || u.clientId === operator.clientId
+    (u) =>
+      u.status === 'ACTIVE' &&
+      ((operator.serverUserId ? u.id === operator.serverUserId : false) || u.clientId === operator.clientId)
   );
 
   const lastSyncedUserRef = useRef<string>('');
+  const promptedJoinRef = useRef<boolean>(false);
 
   const notify = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type });
@@ -119,11 +122,27 @@ export default function App() {
     }, 4500);
   };
 
+  // Prompt operator once on load if they haven't added or selected a team member account yet
   useEffect(() => {
-    return registerPinPromptHandler(() => {
-      setShowPinModal(true);
-    });
-  }, []);
+    if (loading) return;
+    if (operator.serverUserId && !currentServerUser) {
+      const cleared: OperatorProfile = {
+        clientId: operator.clientId,
+        name: '',
+        role: 'Team Member',
+        color: operator.color || OPERATOR_COLORS[0],
+      };
+      saveOperatorProfile(cleared);
+      setOperator(cleared);
+    }
+    if (!currentServerUser && !promptedJoinRef.current) {
+      promptedJoinRef.current = true;
+      setProfileMode('create');
+      setOpNameInput('');
+      setOpRoleInput('Team Member');
+      setShowProfileModal(true);
+    }
+  }, [loading, currentServerUser, operator.serverUserId, operator.clientId, operator.color]);
 
   // Resolve personal shared server invite links (?invite=TOKEN)
   useEffect(() => {
@@ -198,69 +217,125 @@ export default function App() {
     notify(`Switched active server user to ${u.name} (${u.accessLevel}).`);
   };
 
-  const handleSaveProfile = async () => {
-    if (!opNameInput.trim()) {
-      notify('Operator name cannot be empty.', 'error');
-      return;
+  const openOperatorModal = (mode?: 'create' | 'edit') => {
+    const resolvedMode = mode ?? (currentServerUser ? 'edit' : 'create');
+    setProfileMode(resolvedMode);
+    if (resolvedMode === 'create') {
+      setOpNameInput('');
+      setOpRoleInput('Team Member');
+      setOpColorInput(OPERATOR_COLORS[serverUsers.length % OPERATOR_COLORS.length]);
+    } else {
+      setOpNameInput(operator.name);
+      setOpRoleInput(operator.role || 'Team Member');
+      setOpColorInput(operator.color || OPERATOR_COLORS[0]);
     }
-    const updated: OperatorProfile = {
-      ...operator,
-      name: opNameInput.trim(),
-      role: opRoleInput.trim() || 'Team Member',
-      color: opColorInput,
-    };
-    saveOperatorProfile(updated);
-    setOperator(updated);
-    if (currentServerUser && currentServerUser.status === 'ACTIVE' && currentServerUser.canEdit) {
-      lastSyncedUserRef.current = `${currentServerUser.id}|${updated.name}|${updated.role}|${updated.color}|${currentServerUser.inviteToken}`;
-      try {
-        await apiFetch(`/api/server-users/${currentServerUser.id}`, {
-          method: 'PATCH',
-          body: JSON.stringify({
-            name: updated.name,
-            role: updated.role,
-            color: updated.color,
-          }),
-        });
-      } catch {
-        // WS presence syncs too
-      }
-    }
-    setShowProfileModal(false);
-    notify(`Signed in as ${updated.name} (${updated.role}).`);
+    setShowProfileModal(true);
   };
 
-  const handleVerifyPin = async () => {
-    setVerifyingPin(true);
+  const handleSaveProfile = async () => {
+    const cleanName = opNameInput.trim();
+    const cleanRole = opRoleInput.trim() || 'Team Member';
+    if (!cleanName) {
+      notify('Enter your operator name first.', 'error');
+      return;
+    }
+
+    setSavingProfile(true);
     try {
-      const res = await fetch('/api/auth/verify-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pinInput.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'Incorrect Team Edit PIN');
+      if (profileMode === 'edit' && currentServerUser && currentServerUser.status === 'ACTIVE') {
+        const res = await apiFetch(`/api/server-users/${currentServerUser.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            name: cleanName,
+            role: cleanRole,
+            color: opColorInput,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update team member account');
+        const updated: OperatorProfile = {
+          clientId: data.clientId,
+          serverUserId: data.id,
+          inviteToken: data.inviteToken,
+          name: data.name,
+          role: data.role,
+          color: data.color,
+        };
+        lastSyncedUserRef.current = `${data.id}|${data.name}|${data.role}|${data.color}|${data.inviteToken}`;
+        saveOperatorProfile(updated);
+        setOperator(updated);
+        setShowProfileModal(false);
+        notify(`Updated team member account: ${data.name} (${data.role}).`);
+        refresh();
+        return;
       }
-      setStoredTeamPin(pinInput.trim());
-      setShowPinModal(false);
-      notify('Device unlocked for team editing.');
+
+      // Add a new team member account to the server and immediately use it on this device
+      const res = await apiFetch('/api/server-users', {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId: operator.clientId,
+          name: cleanName,
+          role: cleanRole,
+          accessLevel: 'EDITOR',
+          canEdit: true,
+          color: opColorInput,
+          addedBy: cleanName,
+        }),
+      });
+      const created = (await res.json()) as ServerUser & { error?: string };
+      if (!res.ok) throw new Error(created.error || 'Failed to add team member account');
+
+      const nextOp: OperatorProfile = {
+        clientId: created.clientId,
+        serverUserId: created.id,
+        inviteToken: created.inviteToken,
+        name: created.name,
+        role: created.role,
+        color: created.color,
+      };
+      lastSyncedUserRef.current = `${created.id}|${created.name}|${created.role}|${created.color}|${created.inviteToken}`;
+      saveOperatorProfile(nextOp);
+      setOperator(nextOp);
+      setShowProfileModal(false);
+      notify(`Added ${created.name} and active as team member.`);
+      refresh();
     } catch (err) {
       notify((err as Error).message, 'error');
     } finally {
-      setVerifyingPin(false);
+      setSavingProfile(false);
     }
   };
 
   const handleSaveToServer = async (label?: string) => {
+    setPendingSaveLabel(label);
+    setSavePinInput('');
+    setSavePinError('');
+    setShowSavePinModal(true);
+  };
+
+  const handleConfirmSaveToServer = async () => {
+    const cleanPin = savePinInput.trim();
+    if (!cleanPin) {
+      setSavePinError('Enter the Server Save PIN to continue.');
+      return;
+    }
     setSavingToServer(true);
+    setSavePinError('');
     try {
       const res = await apiFetch('/api/server/save', {
         method: 'POST',
-        body: JSON.stringify({ label }),
+        body: JSON.stringify({ label: pendingSaveLabel, pin: cleanPin }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to save data to server');
+      if (!res.ok) {
+        const msg = data.error || 'Incorrect Server Save PIN';
+        setSavePinError(msg);
+        throw new Error(msg);
+      }
+      setShowSavePinModal(false);
+      setSavePinInput('');
+      setPendingSaveLabel(undefined);
       setJustSaved(true);
       window.setTimeout(() => setJustSaved(false), 3000);
       notify(`Saved all team data to main server (${data.savepoint.label}).`);
@@ -368,23 +443,22 @@ export default function App() {
         <div className="p-4 border-t border-slate-800 text-xs space-y-2">
           <button
             type="button"
-            onClick={() => {
-              setOpNameInput(operator.name);
-              setOpRoleInput(operator.role);
-              setOpColorInput(operator.color);
-              setShowProfileModal(true);
-            }}
+            onClick={() => openOperatorModal()}
             className="w-full flex items-center gap-2.5 p-2 bg-slate-800/80 hover:bg-slate-800 text-left transition-colors cursor-pointer"
           >
             <span
               className="h-6 w-6 shrink-0 flex items-center justify-center text-[11px] font-bold text-white"
-              style={{ backgroundColor: operator.color }}
+              style={{ backgroundColor: currentServerUser ? operator.color : '#475569' }}
             >
-              {operator.name.slice(0, 2).toUpperCase()}
+              {currentServerUser && operator.name ? operator.name.slice(0, 2).toUpperCase() : '+'}
             </span>
             <div className="min-w-0 flex-1">
-              <div className="text-xs font-semibold text-white truncate">{operator.name}</div>
-              <div className="text-[10px] text-slate-400 truncate">{operator.role} · Edit Name</div>
+              <div className="text-xs font-semibold text-white truncate">
+                {currentServerUser && operator.name ? operator.name : 'Add Operator Name'}
+              </div>
+              <div className="text-[10px] text-slate-400 truncate">
+                {currentServerUser ? `${operator.role} · Switch / Edit` : 'Join as team member'}
+              </div>
             </div>
           </button>
 
@@ -482,30 +556,19 @@ export default function App() {
             {/* Current Operator Badge */}
             <button
               type="button"
-              onClick={() => {
-                setOpNameInput(operator.name);
-                setOpRoleInput(operator.role);
-                setOpColorInput(operator.color);
-                setShowProfileModal(true);
-              }}
-              className="inline-flex items-center gap-1.5 border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-50 cursor-pointer"
-              title="Switch operator name"
+              onClick={() => openOperatorModal()}
+              className={`inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs font-medium cursor-pointer ${
+                currentServerUser
+                  ? 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
+                  : 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
+              }`}
+              title={currentServerUser ? 'Switch or update team member account' : 'Add your name to join the team'}
             >
               <UserCheck className="h-3.5 w-3.5 text-amber-600" />
-              <span className="hidden md:inline">{operator.name}</span>
+              <span className="hidden md:inline">
+                {currentServerUser && operator.name ? operator.name : 'Add / Join Team'}
+              </span>
             </button>
-
-            {serverInfo?.teamPinEnabled && (
-              <button
-                type="button"
-                onClick={() => setShowPinModal(true)}
-                className="inline-flex items-center gap-1 border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100 cursor-pointer"
-                title="Enter Team Edit PIN"
-              >
-                <Lock className="h-3.5 w-3.5" />
-                <span className="hidden lg:inline">PIN Active</span>
-              </button>
-            )}
 
             <button
               type="button"
@@ -787,10 +850,11 @@ export default function App() {
               onlineMembers={onlineMembers}
               activityLog={activityLog}
               currentClientId={operator.clientId}
-              currentServerUserId={operator.serverUserId}
+              currentServerUserId={currentServerUser?.id}
               savingToServer={savingToServer}
               onSaveToServer={handleSaveToServer}
               onSwitchUser={handleSwitchServerUser}
+              onOpenAddMemberModal={() => openOperatorModal('create')}
               onNotify={notify}
               onRefresh={refresh}
             />
@@ -798,12 +862,16 @@ export default function App() {
         </main>
       </div>
 
-      {/* Operator Profile Modal */}
+      {/* Operator Team Account Modal */}
       {showProfileModal && (
         <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="w-full max-w-sm bg-white border border-slate-200 shadow-lg">
+          <div className="w-full max-w-md bg-white border border-slate-200 shadow-lg">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-900">Your Team Identity</h3>
+              <h3 className="text-sm font-semibold text-slate-900">
+                {profileMode === 'edit' && currentServerUser
+                  ? 'Update Team Member Account'
+                  : 'Add Your Name & Join Team'}
+              </h3>
               <button
                 type="button"
                 onClick={() => setShowProfileModal(false)}
@@ -814,15 +882,48 @@ export default function App() {
             </div>
             <div className="p-4 space-y-3 text-xs">
               <p className="text-slate-600">
-                Your name appears in the live presence list and records who created or edited items on this server.
+                {profileMode === 'edit' && currentServerUser
+                  ? 'Update your active team member details, add a new operator account, or switch to an existing member.'
+                  : 'Enter your name to create your team member account on this server and use it on this device, or pick an existing team member below.'}
               </p>
+
+              {currentServerUser && (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openOperatorModal('edit')}
+                    className={`flex-1 border px-2.5 py-1.5 text-[11px] font-semibold cursor-pointer ${
+                      profileMode === 'edit'
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    Edit Current ({currentServerUser.name})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openOperatorModal('create')}
+                    className={`flex-1 border px-2.5 py-1.5 text-[11px] font-semibold cursor-pointer ${
+                      profileMode === 'create'
+                        ? 'border-amber-600 bg-amber-600 text-white'
+                        : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    + Add New Member
+                  </button>
+                </div>
+              )}
+
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Display Name *</label>
+                <label className="block font-medium text-slate-700 mb-1">Operator Name *</label>
                 <input
                   type="text"
                   value={opNameInput}
                   onChange={(e) => setOpNameInput(e.target.value)}
-                  placeholder="e.g. Marco (Sound Tech)"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleSaveProfile();
+                  }}
+                  placeholder="e.g. Marco Reyes"
                   className="w-full border border-slate-300 px-2.5 py-2 focus:border-amber-600 focus:outline-none"
                 />
               </div>
@@ -832,7 +933,7 @@ export default function App() {
                   type="text"
                   value={opRoleInput}
                   onChange={(e) => setOpRoleInput(e.target.value)}
-                  placeholder="Warehouse Lead, Sales, Cashier..."
+                  placeholder="Audio Lead, Cashier, Tech..."
                   className="w-full border border-slate-300 px-2.5 py-2 focus:border-amber-600 focus:outline-none"
                 />
               </div>
@@ -853,16 +954,14 @@ export default function App() {
                 </div>
               </div>
 
-              {serverUsers.filter((u) => u.status === 'ACTIVE').length > 1 && (
+              {serverUsers.filter((u) => u.status === 'ACTIVE').length > 0 && (
                 <div className="pt-2 border-t border-slate-200 space-y-1.5">
-                  <div className="font-medium text-slate-700">Or Switch Shared Server User</div>
+                  <div className="font-medium text-slate-700">Or Use an Existing Team Member Account</div>
                   <div className="max-h-36 overflow-y-auto space-y-1">
                     {serverUsers
                       .filter((u) => u.status === 'ACTIVE')
                       .map((u) => {
-                        const isActive =
-                          (operator.serverUserId !== undefined && u.id === operator.serverUserId) ||
-                          u.clientId === operator.clientId;
+                        const isActive = currentServerUser?.id === u.id;
                         return (
                           <button
                             key={u.id}
@@ -882,10 +981,10 @@ export default function App() {
                                 {u.name.slice(0, 2).toUpperCase()}
                               </span>
                               <span className="truncate font-medium text-slate-900">{u.name}</span>
+                              <span className="text-[10px] text-slate-500 truncate">{u.role}</span>
                             </span>
-                            <span className="text-[10px] font-mono text-slate-500 shrink-0">
-                              {u.accessLevel}
-                              {u.isOnline ? ' · LIVE' : ''}
+                            <span className="text-[10px] font-mono text-slate-600 shrink-0">
+                              {isActive ? 'ACTIVE' : 'Use Account'}
                             </span>
                           </button>
                         );
@@ -904,28 +1003,36 @@ export default function App() {
               </button>
               <button
                 type="button"
+                disabled={savingProfile}
                 onClick={handleSaveProfile}
-                className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
+                className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer disabled:opacity-60"
               >
-                Save Identity
+                {savingProfile
+                  ? 'Saving...'
+                  : profileMode === 'edit' && currentServerUser
+                    ? 'Update Team Account'
+                    : 'Add & Use Account'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Team Edit PIN Unlock Modal */}
-      {showPinModal && (
+      {/* Save to Main Server PIN Modal */}
+      {showSavePinModal && (
         <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-sm bg-white border border-slate-200 shadow-lg">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
               <h3 className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
-                <Lock className="h-4 w-4 text-amber-600" />
-                Team Edit PIN Required
+                <Lock className="h-4 w-4 text-emerald-700" />
+                Save Checkpoint to Server
               </h3>
               <button
                 type="button"
-                onClick={() => setShowPinModal(false)}
+                onClick={() => {
+                  setShowSavePinModal(false);
+                  setSavePinError('');
+                }}
                 className="text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 <X className="h-4 w-4" />
@@ -933,37 +1040,53 @@ export default function App() {
             </div>
             <div className="p-4 space-y-3 text-xs">
               <p className="text-slate-600">
-                The host server has enabled a shared Team Edit PIN. Enter the PIN to save changes from this device.
+                Enter the Server Save PIN to save this checkpoint to the main server.
               </p>
+              {pendingSaveLabel && (
+                <div className="bg-slate-50 border border-slate-200 px-2.5 py-1.5 text-[11px] text-slate-700">
+                  Checkpoint Note: <strong className="text-slate-900">{pendingSaveLabel}</strong>
+                </div>
+              )}
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Shared Team PIN</label>
+                <label className="block font-medium text-slate-700 mb-1">Server Save PIN *</label>
                 <input
                   type="password"
-                  value={pinInput}
-                  onChange={(e) => setPinInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleVerifyPin();
+                  inputMode="numeric"
+                  autoFocus
+                  value={savePinInput}
+                  onChange={(e) => {
+                    setSavePinInput(e.target.value);
+                    if (savePinError) setSavePinError('');
                   }}
-                  placeholder="Enter team PIN"
-                  className="w-full border border-slate-300 px-2.5 py-2 font-mono focus:border-amber-600 focus:outline-none"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleConfirmSaveToServer();
+                  }}
+                  placeholder="Enter Server Save PIN"
+                  className="w-full border border-slate-300 px-2.5 py-2 font-mono focus:border-emerald-700 focus:outline-none"
                 />
+                {savePinError && (
+                  <div className="mt-1.5 text-[11px] font-semibold text-red-600">{savePinError}</div>
+                )}
               </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-slate-200 px-4 py-3 bg-slate-50">
               <button
                 type="button"
-                onClick={() => setShowPinModal(false)}
+                onClick={() => {
+                  setShowSavePinModal(false);
+                  setSavePinError('');
+                }}
                 className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                disabled={verifyingPin}
-                onClick={handleVerifyPin}
-                className="bg-amber-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 cursor-pointer"
+                disabled={savingToServer}
+                onClick={handleConfirmSaveToServer}
+                className="bg-emerald-700 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-800 cursor-pointer disabled:opacity-60"
               >
-                Unlock Editing
+                {savingToServer ? 'Saving...' : 'Verify PIN & Save'}
               </button>
             </div>
           </div>

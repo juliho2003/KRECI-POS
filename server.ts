@@ -98,20 +98,6 @@ async function startServer() {
 
   wss.on('connection', (ws) => {
     const now = new Date().toISOString();
-    presenceMap.set(ws, {
-      clientId: `anon-${Math.random().toString(36).slice(2, 8)}`,
-      serverUserId: null,
-      name: 'Team Device',
-      role: 'Operator',
-      color: '#d97706',
-      accessLevel: 'EDITOR',
-      canEdit: true,
-      activeView: 'pos',
-      editingKey: null,
-      connectedAt: now,
-      lastSeenAt: now,
-    });
-
     ws.send(
       JSON.stringify({
         type: 'presence:updated',
@@ -120,7 +106,6 @@ async function startServer() {
         members: getOnlineMembers(),
       })
     );
-    broadcastPresence();
 
     ws.on('message', (raw) => {
       try {
@@ -147,21 +132,31 @@ async function startServer() {
         }
         if (msg.kind === 'presence') {
           const prev = presenceMap.get(ws);
-          const clientId = msg.clientId || prev?.clientId || `dev-${Date.now()}`;
-          const name = (msg.name || prev?.name || 'Team Member').slice(0, 40);
-          const role = (msg.role || prev?.role || 'Staff').slice(0, 32);
+          const clientId = (msg.clientId || prev?.clientId || '').trim();
+          const name = (msg.name || prev?.name || '').slice(0, 40);
+          const role = (msg.role || prev?.role || 'Team Member').slice(0, 32);
           const color = msg.color || prev?.color || '#d97706';
 
-          const dbUser = touchServerUserPresence({
-            clientId,
-            serverUserId: msg.serverUserId ?? prev?.serverUserId ?? null,
-            name,
-            role,
-            color,
-            syncProfile: Boolean(msg.syncProfile),
-            activeView: msg.activeView || prev?.activeView || 'pos',
-            editingKey: msg.editingKey ?? null,
-          });
+          const dbUser = clientId
+            ? touchServerUserPresence({
+                clientId,
+                serverUserId: msg.serverUserId ?? prev?.serverUserId ?? null,
+                name,
+                role,
+                color,
+                syncProfile: Boolean(msg.syncProfile),
+                activeView: msg.activeView || prev?.activeView || 'pos',
+                editingKey: msg.editingKey ?? null,
+              })
+            : undefined;
+
+          if (!dbUser || dbUser.status !== 'ACTIVE') {
+            if (presenceMap.has(ws)) {
+              presenceMap.delete(ws);
+              broadcastPresence();
+            }
+            return;
+          }
 
           const userChanged =
             !prev ||
@@ -171,7 +166,7 @@ async function startServer() {
             prev.color !== dbUser.color;
 
           presenceMap.set(ws, {
-            clientId,
+            clientId: dbUser.clientId,
             serverUserId: dbUser.id,
             name: dbUser.name,
             role: dbUser.role,
@@ -194,9 +189,11 @@ async function startServer() {
     });
 
     ws.on('close', () => {
-      presenceMap.delete(ws);
-      broadcastPresence();
-      broadcast('users:updated', 'disconnected');
+      if (presenceMap.has(ws)) {
+        presenceMap.delete(ws);
+        broadcastPresence();
+        broadcast('users:updated', 'disconnected');
+      }
     });
   });
 

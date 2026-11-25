@@ -8,7 +8,6 @@ export interface OperatorProfile {
 }
 
 const PROFILE_KEY = 'kr_oncue_operator_profile';
-const PIN_KEY = 'kr_oncue_team_pin';
 
 const AVATAR_COLORS = [
   '#d97706', // amber-600
@@ -25,11 +24,15 @@ function generateClientId(): string {
 }
 
 export function getOperatorProfile(): OperatorProfile {
+  let existingClientId = '';
   try {
     const raw = localStorage.getItem(PROFILE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<OperatorProfile>;
-      if (parsed.name && parsed.clientId) {
+      existingClientId = parsed.clientId || '';
+      const isLegacyAutoName =
+        !parsed.serverUserId && !parsed.inviteToken && /^Operator \d{2}$/.test(parsed.name || '');
+      if (parsed.name && parsed.clientId && !isLegacyAutoName) {
         return {
           clientId: parsed.clientId,
           serverUserId: parsed.serverUserId,
@@ -43,12 +46,11 @@ export function getOperatorProfile(): OperatorProfile {
   } catch {
     // ignore storage errors
   }
-  const suffix = Math.floor(10 + Math.random() * 89);
   const initial: OperatorProfile = {
-    clientId: generateClientId(),
-    name: `Operator ${suffix}`,
+    clientId: existingClientId || generateClientId(),
+    name: '',
     role: 'Team Member',
-    color: AVATAR_COLORS[suffix % AVATAR_COLORS.length],
+    color: AVATAR_COLORS[0],
   };
   saveOperatorProfile(initial);
   return initial;
@@ -62,40 +64,10 @@ export function saveOperatorProfile(profile: OperatorProfile): void {
   }
 }
 
-export function getStoredTeamPin(): string {
-  try {
-    return localStorage.getItem(PIN_KEY) || '';
-  } catch {
-    return '';
-  }
-}
-
-export function setStoredTeamPin(pin: string): void {
-  try {
-    if (pin) {
-      localStorage.setItem(PIN_KEY, pin);
-    } else {
-      localStorage.removeItem(PIN_KEY);
-    }
-  } catch {
-    // ignore
-  }
-}
-
-let pinPromptHandler: (() => void) | null = null;
-
-export function registerPinPromptHandler(fn: () => void): () => void {
-  pinPromptHandler = fn;
-  return () => {
-    if (pinPromptHandler === fn) pinPromptHandler = null;
-  };
-}
-
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const profile = getOperatorProfile();
-  const pin = getStoredTeamPin();
   const headers = new Headers(init.headers);
-  headers.set('X-Operator-Name', encodeURIComponent(profile.name));
+  headers.set('X-Operator-Name', encodeURIComponent(profile.name || 'Team Member'));
   headers.set('X-Client-Id', profile.clientId);
   if (profile.serverUserId) {
     headers.set('X-Server-User-Id', String(profile.serverUserId));
@@ -103,18 +75,11 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   if (profile.inviteToken) {
     headers.set('Authorization', `Bearer ${profile.inviteToken}`);
   }
-  if (pin) {
-    headers.set('X-Team-Pin', pin);
-  }
   if (init.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
 
-  const res = await fetch(input, { ...init, headers });
-  if (res.status === 401 && pinPromptHandler) {
-    pinPromptHandler();
-  }
-  return res;
+  return fetch(input, { ...init, headers });
 }
 
 export async function copyTextSafe(text: string): Promise<boolean> {

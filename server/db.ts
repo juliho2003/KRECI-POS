@@ -346,10 +346,10 @@ export function initDatabase(): void {
     "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES ('serverLabel', 'KR-ONCUE Main Team Server', ?)"
   ).run(nowInit);
   db.prepare(
-    "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES ('teamPinEnabled', 'false', ?)"
+    "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('teamPinEnabled', 'false', ?)"
   ).run(nowInit);
   db.prepare(
-    "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES ('teamPin', '', ?)"
+    "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('teamPin', '', ?)"
   ).run(nowInit);
   db.prepare(
     "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES ('lastManualSaveAt', '', ?)"
@@ -385,6 +385,16 @@ export function initDatabase(): void {
       ).run(nowInit);
     });
     omitTx();
+  }
+
+  const cleanedAutoOps = db
+    .prepare("SELECT value FROM app_settings WHERE key = 'cleanedAutoOperatorUsersV1'")
+    .get() as { value: string } | undefined;
+  if (!cleanedAutoOps) {
+    db.prepare("DELETE FROM server_users WHERE added_by = 'Shared Web Link' AND access_level != 'OWNER'").run();
+    db.prepare(
+      "INSERT OR REPLACE INTO app_settings (key, value, updated_at) VALUES ('cleanedAutoOperatorUsersV1', 'true', ?)"
+    ).run(nowInit);
   }
 
   const userCount = db.prepare('SELECT COUNT(*) as cnt FROM server_users').get() as { cnt: number };
@@ -2866,6 +2876,7 @@ export function getServerUserByToken(token: string): ServerUser | undefined {
 }
 
 export function createServerUser(input: {
+  clientId?: string;
   name: string;
   email?: string;
   role?: string;
@@ -2877,7 +2888,10 @@ export function createServerUser(input: {
   const now = new Date().toISOString();
   const accessLevel: ServerUserAccess = input.accessLevel ?? 'EDITOR';
   const canEdit = input.canEdit !== undefined ? input.canEdit : accessLevel !== 'VIEWER';
-  const clientId = `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  let clientId = (input.clientId ?? '').trim();
+  if (!clientId || getServerUserByClientId(clientId)) {
+    clientId = `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  }
   const inviteToken = makeToken();
 
   const res = db
@@ -2891,7 +2905,7 @@ export function createServerUser(input: {
       clientId,
       input.name.trim(),
       (input.email ?? '').trim(),
-      (input.role ?? (accessLevel === 'VIEWER' ? 'Viewer' : 'Team Editor')).trim(),
+      (input.role ?? (accessLevel === 'VIEWER' ? 'Viewer' : 'Team Member')).trim(),
       input.color ?? '#0284c7',
       accessLevel,
       canEdit ? 1 : 0,
@@ -2969,59 +2983,39 @@ export function touchServerUserPresence(input: {
   syncProfile?: boolean;
   activeView?: string;
   editingKey?: string | null;
-}): ServerUser {
+}): ServerUser | undefined {
   const now = new Date().toISOString();
   let user = input.serverUserId ? getServerUserById(input.serverUserId) : undefined;
   if (!user && input.clientId) {
     user = getServerUserByClientId(input.clientId);
   }
-  const activeView = input.activeView ?? user?.activeView ?? 'pos';
-  const editingKey = input.editingKey !== undefined ? input.editingKey : (user?.editingKey ?? null);
-
-  if (user) {
-    if (input.syncProfile) {
-      db.prepare(
-        'UPDATE server_users SET last_seen_at = ?, name = ?, role = ?, color = ?, active_view = ?, editing_key = ? WHERE id = ?'
-      ).run(
-        now,
-        input.name.trim() || user.name,
-        input.role.trim() || user.role,
-        input.color || user.color,
-        activeView,
-        editingKey,
-        user.id
-      );
-    } else {
-      db.prepare('UPDATE server_users SET last_seen_at = ?, active_view = ?, editing_key = ? WHERE id = ?').run(
-        now,
-        activeView,
-        editingKey,
-        user.id
-      );
-    }
-    return getServerUserById(user.id)!;
+  if (!user) {
+    return undefined;
   }
 
-  // Auto-register any new device/user accessing the shared web link so they appear live in Server Users
-  const inviteToken = makeToken();
-  const res = db
-    .prepare(`
-      INSERT INTO server_users (
-        client_id, name, email, role, color, access_level, can_edit, status,
-        invite_token, added_by, last_seen_at, created_at, active_view, editing_key
-      ) VALUES (?, ?, '', ?, ?, 'EDITOR', 1, 'ACTIVE', ?, 'Shared Web Link', ?, ?, ?, ?)
-    `)
-    .run(
-      input.clientId,
-      input.name.trim() || 'Shared User',
-      input.role.trim() || 'Team Member',
-      input.color || '#0284c7',
-      inviteToken,
+  const activeView = input.activeView ?? user.activeView ?? 'pos';
+  const editingKey = input.editingKey !== undefined ? input.editingKey : (user.editingKey ?? null);
+
+  if (input.syncProfile && input.name.trim()) {
+    db.prepare(
+      'UPDATE server_users SET last_seen_at = ?, name = ?, role = ?, color = ?, active_view = ?, editing_key = ? WHERE id = ?'
+    ).run(
       now,
+      input.name.trim() || user.name,
+      input.role.trim() || user.role,
+      input.color || user.color,
+      activeView,
+      editingKey,
+      user.id
+    );
+  } else {
+    db.prepare('UPDATE server_users SET last_seen_at = ?, active_view = ?, editing_key = ? WHERE id = ?').run(
       now,
       activeView,
-      editingKey
+      editingKey,
+      user.id
     );
-  return getServerUserById(Number(res.lastInsertRowid))!;
+  }
+  return getServerUserById(user.id);
 }
 

@@ -179,7 +179,7 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-API-Key, X-Team-Pin, X-Operator-Name, X-Client-Id, X-Server-User-Id'
+      'Content-Type, Authorization, X-API-Key, X-Save-Pin, X-Team-Pin, X-Operator-Name, X-Client-Id, X-Server-User-Id'
     );
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -238,17 +238,7 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
       }
     }
 
-    const settings = getServerSettings();
-    if (settings.teamPinEnabled && settings.teamPin) {
-      const provided = req.header('x-team-pin') ?? '';
-      if (provided !== settings.teamPin) {
-        res.status(401).json({
-          error: 'Team Edit PIN is required to save changes on this server.',
-          pinRequired: true,
-        });
-        return;
-      }
-    }
+    // No general Team PIN required for regular edits; only server savepoints require PIN 2022
     next();
   });
 
@@ -265,28 +255,30 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
 
   app.post('/api/presence', (req, res) => {
     try {
-      const clientId = String(req.body?.clientId || req.header('x-client-id') || `dev-${Date.now()}`);
+      const clientId = String(req.body?.clientId || req.header('x-client-id') || '').trim();
       const serverUserId = req.body?.serverUserId ?? (req.header('x-server-user-id') ? Number(req.header('x-server-user-id')) : null);
-      const name = String(req.body?.name || getActor(req) || 'Team Member').slice(0, 40);
-      const role = String(req.body?.role || 'Staff').slice(0, 32);
+      const name = String(req.body?.name || '').slice(0, 40);
+      const role = String(req.body?.role || 'Team Member').slice(0, 32);
       const color = String(req.body?.color || '#d97706');
       const activeView = req.body?.activeView ? String(req.body.activeView) : 'pos';
       const editingKey = req.body?.editingKey !== undefined ? (req.body.editingKey ? String(req.body.editingKey) : null) : null;
 
-      const user = touchServerUserPresence({
-        clientId,
-        serverUserId,
-        name,
-        role,
-        color,
-        syncProfile: Boolean(req.body?.syncProfile),
-        activeView,
-        editingKey,
-      });
+      const user = clientId
+        ? touchServerUserPresence({
+            clientId,
+            serverUserId,
+            name,
+            role,
+            color,
+            syncProfile: Boolean(req.body?.syncProfile),
+            activeView,
+            editingKey,
+          })
+        : undefined;
 
       res.json({
         ok: true,
-        user,
+        user: user ?? null,
         members: getOnlineMembers(),
         serverUsers: getEnrichedServerUsers(),
       });
@@ -479,16 +471,11 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
   });
 
   app.post('/api/auth/verify-pin', (req, res) => {
-    const settings = getServerSettings();
-    if (!settings.teamPinEnabled || !settings.teamPin) {
-      res.json({ ok: true, teamPinEnabled: false });
-      return;
-    }
     const pin = String(req.body?.pin ?? '').trim();
-    if (pin === settings.teamPin) {
-      res.json({ ok: true, teamPinEnabled: true });
+    if (pin === '2022') {
+      res.json({ ok: true, teamPinEnabled: false });
     } else {
-      res.status(401).json({ ok: false, error: 'Incorrect Team Edit PIN' });
+      res.status(401).json({ ok: false, error: 'Incorrect Server Save PIN' });
     }
   });
 
@@ -497,10 +484,9 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
       const actor = getActor(req);
       const updated = updateServerSettings({
         serverLabel: req.body.serverLabel,
-        teamPinEnabled: req.body.teamPinEnabled,
-        teamPin: req.body.teamPin,
+        teamPinEnabled: false,
       });
-      logActivity(actor, 'UPDATE', 'settings', 'server', `Updated server sharing settings (${updated.serverLabel})`);
+      logActivity(actor, 'UPDATE', 'settings', 'server', `Updated server settings (${updated.serverLabel})`);
       broadcast('settings:updated', updated.serverLabel);
       broadcast('activity:updated');
       res.json(updated);
@@ -556,23 +542,24 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
       }
       const actor = getActor(req);
       const user = createServerUser({
+        clientId: typeof req.body.clientId === 'string' ? req.body.clientId : undefined,
         name: req.body.name,
         email: req.body.email,
         role: req.body.role,
         color: req.body.color,
         accessLevel: req.body.accessLevel,
         canEdit: req.body.canEdit,
-        addedBy: actor,
+        addedBy: typeof req.body.addedBy === 'string' && req.body.addedBy.trim() ? req.body.addedBy.trim() : actor,
       });
       logActivity(
-        actor,
+        user.addedBy || actor,
         'USER',
         'server_user',
         String(user.id),
-        `Shared server access with ${user.name} (${user.accessLevel})`
+        `Added team member ${user.name} (${user.accessLevel})`
       );
       broadcast('users:updated', user.name);
-      broadcast('activity:updated', actor);
+      broadcast('activity:updated', user.name);
       res.status(201).json(user);
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
@@ -1188,6 +1175,16 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
 
   app.post('/api/server/save', (req, res) => {
     try {
+      const providedPin = String(
+        req.body?.pin ?? req.header('x-save-pin') ?? req.header('x-team-pin') ?? ''
+      ).trim();
+      if (providedPin !== '2022') {
+        res.status(401).json({
+          error: 'Incorrect PIN. A valid Server Save PIN is required to save to the main server.',
+          savePinRequired: true,
+        });
+        return;
+      }
       const actor = getActor(req);
       const label = typeof req.body?.label === 'string' ? req.body.label : undefined;
       const savepoint = saveServerCheckpoint(actor, label);

@@ -10,7 +10,6 @@ import {
   FileSpreadsheet,
   KeyRound,
   Link2,
-  Lock,
   Monitor,
   RefreshCw,
   RotateCcw,
@@ -49,6 +48,7 @@ interface TeamServerViewProps {
   savingToServer: boolean;
   onSaveToServer: (label?: string) => Promise<void>;
   onSwitchUser: (user: ServerUser) => void;
+  onOpenAddMemberModal?: () => void;
   onNotify: (msg: string, type?: 'success' | 'error') => void;
   onRefresh: () => void;
 }
@@ -82,6 +82,7 @@ export function TeamServerView({
   savingToServer,
   onSaveToServer,
   onSwitchUser,
+  onOpenAddMemberModal,
   onNotify,
   onRefresh,
 }: TeamServerViewProps) {
@@ -102,8 +103,6 @@ export function TeamServerView({
   const [saveLabel, setSaveLabel] = useState('');
 
   const [serverLabel, setServerLabel] = useState(serverInfo?.serverLabel ?? 'KR-ONCUE Main Team Server');
-  const [pinEnabled, setPinEnabled] = useState(serverInfo?.teamPinEnabled ?? false);
-  const [pinValue, setPinValue] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -115,6 +114,7 @@ export function TeamServerView({
   const [newUserRole, setNewUserRole] = useState('Team Member');
   const [newUserAccess, setNewUserAccess] = useState<ServerUserAccess>('EDITOR');
   const [newUserColor, setNewUserColor] = useState(USER_COLORS[1]);
+  const [useNewUserOnDevice, setUseNewUserOnDevice] = useState(!currentServerUserId);
   const [creatingUser, setCreatingUser] = useState(false);
   const [updatingUserId, setUpdatingUserId] = useState<number | null>(null);
   const [confirmDeleteUserId, setConfirmDeleteUserId] = useState<number | null>(null);
@@ -126,7 +126,6 @@ export function TeamServerView({
   useEffect(() => {
     if (serverInfo) {
       setServerLabel(serverInfo.serverLabel);
-      setPinEnabled(serverInfo.teamPinEnabled);
     }
   }, [serverInfo]);
 
@@ -167,27 +166,18 @@ export function TeamServerView({
   };
 
   const handleSaveSettings = async () => {
-    if (pinEnabled && !serverInfo?.teamPinEnabled && !pinValue.trim()) {
-      onNotify('Enter a Team PIN before enabling PIN protection.', 'error');
-      return;
-    }
     setSavingSettings(true);
     try {
-      const body: Record<string, unknown> = {
-        serverLabel: serverLabel.trim() || 'KR-ONCUE Main Team Server',
-        teamPinEnabled: pinEnabled,
-      };
-      if (pinValue.trim()) {
-        body.teamPin = pinValue.trim();
-      }
       const res = await apiFetch('/api/server-settings', {
         method: 'PATCH',
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          serverLabel: serverLabel.trim() || 'KR-ONCUE Main Team Server',
+          teamPinEnabled: false,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save server settings');
-      setPinValue('');
-      onNotify('Team server sharing settings saved.');
+      onNotify('Team server settings saved.');
       onRefresh();
     } catch (err) {
       onNotify((err as Error).message, 'error');
@@ -246,7 +236,7 @@ export function TeamServerView({
 
   const handleCreateUser = async () => {
     if (!newUserName.trim()) {
-      onNotify('Enter the user name to share access with.', 'error');
+      onNotify('Enter the operator or team member name.', 'error');
       return;
     }
     setCreatingUser(true);
@@ -254,28 +244,37 @@ export function TeamServerView({
       const res = await apiFetch('/api/server-users', {
         method: 'POST',
         body: JSON.stringify({
+          clientId: useNewUserOnDevice ? currentClientId : undefined,
           name: newUserName.trim(),
           email: newUserEmail.trim(),
           role: newUserRole.trim() || 'Team Member',
           accessLevel: newUserAccess,
           canEdit: newUserAccess !== 'VIEWER',
           color: newUserColor,
+          addedBy: useNewUserOnDevice ? newUserName.trim() : undefined,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to add server user');
-      const base = selectedUrl || browserOrigin;
-      const inviteLink = `${base}/?invite=${data.inviteToken}`;
-      onNotify(`Added ${data.name} (${data.accessLevel}) — share link is ready.`);
-      const copied = await copyTextSafe(inviteLink);
-      if (copied) {
-        setCopiedUrl(inviteLink);
-        window.setTimeout(() => setCopiedUrl((curr) => (curr === inviteLink ? '' : curr)), 2500);
+
+      if (useNewUserOnDevice) {
+        onSwitchUser(data);
+        onNotify(`Added ${data.name} and set as your active team member account.`);
+      } else {
+        const base = selectedUrl || browserOrigin;
+        const inviteLink = `${base}/?invite=${data.inviteToken}`;
+        onNotify(`Added ${data.name} (${data.accessLevel}) — share link is ready.`);
+        const copied = await copyTextSafe(inviteLink);
+        if (copied) {
+          setCopiedUrl(inviteLink);
+          window.setTimeout(() => setCopiedUrl((curr) => (curr === inviteLink ? '' : curr)), 2500);
+        }
       }
       setNewUserName('');
       setNewUserEmail('');
       setNewUserRole('Team Member');
       setNewUserAccess('EDITOR');
+      setUseNewUserOnDevice(false);
       setShowAddUser(false);
       onRefresh();
     } catch (err) {
@@ -568,10 +567,27 @@ export function TeamServerView({
           </button>
         </div>
 
+        {!currentServerUserId && (
+          <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900">
+            <span>
+              <strong>No operator account active on this device yet.</strong> Add your name below or click <strong>Use Account</strong> on an existing team member.
+            </span>
+            {onOpenAddMemberModal && (
+              <button
+                type="button"
+                onClick={onOpenAddMemberModal}
+                className="bg-amber-600 px-3 py-1 text-[11px] font-semibold text-white hover:bg-amber-700 cursor-pointer"
+              >
+                Add My Name &amp; Join
+              </button>
+            )}
+          </div>
+        )}
+
         {showAddUser && (
           <div className="border-b border-slate-200 bg-amber-50/40 p-4 space-y-3 text-xs">
             <div className="font-semibold text-slate-900">
-              Grant Access &amp; Generate Personal Web Invite Link
+              Add Team Member &amp; Generate Personal Invite Link
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               <div>
@@ -633,23 +649,39 @@ export function TeamServerView({
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowAddUser(false)}
-                className="border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={creatingUser}
-                onClick={handleCreateUser}
-                className="inline-flex items-center gap-1.5 bg-slate-900 px-4 py-1.5 font-semibold text-white hover:bg-slate-800 cursor-pointer disabled:opacity-60"
-              >
-                <UserPlus className="h-3.5 w-3.5" />
-                {creatingUser ? 'Adding User...' : 'Create & Copy Invite Link'}
-              </button>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <label className="inline-flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useNewUserOnDevice}
+                  onChange={(e) => setUseNewUserOnDevice(e.target.checked)}
+                  className="h-4 w-4 accent-amber-600"
+                />
+                <span>Use this account as my active team member on this device</span>
+              </label>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddUser(false)}
+                  className="border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={creatingUser}
+                  onClick={handleCreateUser}
+                  className="inline-flex items-center gap-1.5 bg-slate-900 px-4 py-1.5 font-semibold text-white hover:bg-slate-800 cursor-pointer disabled:opacity-60"
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  {creatingUser
+                    ? 'Adding User...'
+                    : useNewUserOnDevice
+                      ? 'Add & Use Account'
+                      : 'Create & Copy Invite Link'}
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -838,10 +870,10 @@ export function TeamServerView({
                               type="button"
                               onClick={() => onSwitchUser(u)}
                               className="inline-flex items-center gap-1 border border-sky-300 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-800 hover:bg-sky-100 cursor-pointer"
-                              title="Switch this browser into this user's shared profile"
+                              title="Use this team member account on this device"
                             >
                               <UserCheck className="h-3 w-3" />
-                              Use Profile
+                              Use Account
                             </button>
                           )}
 
@@ -920,43 +952,14 @@ export function TeamServerView({
               />
             </div>
 
-            <div className="border border-slate-200 bg-slate-50 p-3 space-y-2.5">
-              <label className="flex items-center justify-between cursor-pointer">
-                <div className="flex items-center gap-2">
-                  {pinEnabled ? (
-                    <Lock className="h-3.5 w-3.5 text-amber-700" />
-                  ) : (
-                    <Unlock className="h-3.5 w-3.5 text-emerald-700" />
-                  )}
-                  <span className="font-semibold text-slate-800">Require Team PIN to Save Edits</span>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={pinEnabled}
-                  onChange={(e) => setPinEnabled(e.target.checked)}
-                  className="h-4 w-4 accent-amber-600"
-                />
-              </label>
-              <p className="text-[11px] text-slate-600">
-                {pinEnabled
-                  ? 'Teammates can view everything, and must enter the shared PIN once to save or edit records.'
-                  : 'Open Team Mode: Anyone with the share link can edit inventory, quotes, rentals, and slips immediately.'}
+            <div className="border border-emerald-200 bg-emerald-50/60 p-3 space-y-1.5">
+              <div className="flex items-center gap-2 font-semibold text-emerald-900">
+                <Unlock className="h-3.5 w-3.5 text-emerald-700" />
+                <span>Open Team Mode Active</span>
+              </div>
+              <p className="text-[11px] text-emerald-800">
+                No PIN is required for day-to-day team edits (inventory, quotes, rentals, slips). Saving a checkpoint to the main server requires the Server Save PIN.
               </p>
-
-              {pinEnabled && (
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    {serverInfo?.teamPinEnabled ? 'Update Team PIN (leave blank to keep current)' : 'Set Team Edit PIN *'}
-                  </label>
-                  <input
-                    type="password"
-                    value={pinValue}
-                    onChange={(e) => setPinValue(e.target.value)}
-                    placeholder="e.g. 2026"
-                    className="w-full border border-slate-300 bg-white px-2.5 py-2 font-mono focus:border-amber-600 focus:outline-none"
-                  />
-                </div>
-              )}
             </div>
 
             <button
@@ -1107,7 +1110,7 @@ export function TeamServerView({
         const token = apiUser?.inviteToken || 'host-owner-key';
         const maskedToken = showApiToken ? token : `${token.slice(0, 6)}••••••••••••`;
         const summaryCurl = `curl -H "Authorization: Bearer ${token}" "${apiBase}/api/apple/summary"`;
-        const saveCurl = `curl -X POST -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"label":"iPhone Shortcut Save"}' "${apiBase}/api/server/save"`;
+        const saveCurl = `curl -X POST -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"label":"iPhone Shortcut Save","pin":"****"}' "${apiBase}/api/server/save"`;
 
         return (
           <div className="bg-white border border-slate-200">
