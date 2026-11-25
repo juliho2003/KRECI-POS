@@ -34,7 +34,9 @@ import { useRealtimePOS } from './hooks/useRealtimePOS';
 import type { EquipmentCategoryCode, ServerUser } from './types';
 import {
   apiFetch,
+  detectDeviceName,
   getOperatorProfile,
+  getOrCreateDeviceId,
   saveOperatorProfile,
   type OperatorProfile,
 } from './utils/api';
@@ -107,9 +109,7 @@ export default function App() {
   } = useRealtimePOS(operator, activeView, editingKey);
 
   const currentServerUser = serverUsers.find(
-    (u) =>
-      u.status === 'ACTIVE' &&
-      ((operator.serverUserId ? u.id === operator.serverUserId : false) || u.clientId === operator.clientId)
+    (u) => u.status === 'ACTIVE' && operator.serverUserId !== undefined && u.id === operator.serverUserId
   );
 
   const lastSyncedUserRef = useRef<string>('');
@@ -125,9 +125,13 @@ export default function App() {
   // Prompt operator once on load if they haven't added or selected a team member account yet
   useEffect(() => {
     if (loading) return;
+    const deviceId = operator.deviceId || getOrCreateDeviceId();
+    const deviceName = operator.deviceName || detectDeviceName();
     if (operator.serverUserId && !currentServerUser) {
       const cleared: OperatorProfile = {
-        clientId: operator.clientId,
+        clientId: deviceId,
+        deviceId,
+        deviceName,
         name: '',
         role: 'Team Member',
         color: operator.color || OPERATOR_COLORS[0],
@@ -142,7 +146,7 @@ export default function App() {
       setOpRoleInput('Team Member');
       setShowProfileModal(true);
     }
-  }, [loading, currentServerUser, operator.serverUserId, operator.clientId, operator.color]);
+  }, [loading, currentServerUser, operator.serverUserId, operator.deviceId, operator.deviceName, operator.color]);
 
   // Resolve personal shared server invite links (?invite=TOKEN)
   useEffect(() => {
@@ -153,15 +157,20 @@ export default function App() {
     const cleanUrl = window.location.pathname + (window.location.hash || '');
     window.history.replaceState({}, '', cleanUrl);
 
+    const deviceId = getOrCreateDeviceId();
+    const deviceName = detectDeviceName();
+
     fetch(`/api/server-users/resolve?invite=${encodeURIComponent(inviteToken)}`)
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Invalid invite link');
         return data as ServerUser;
       })
-      .then((user) => {
+      .then(async (user) => {
         const nextOp: OperatorProfile = {
           clientId: user.clientId,
+          deviceId,
+          deviceName,
           serverUserId: user.id,
           inviteToken: user.inviteToken,
           name: user.name,
@@ -171,23 +180,45 @@ export default function App() {
         lastSyncedUserRef.current = `${user.id}|${user.name}|${user.role}|${user.color}|${user.inviteToken}`;
         saveOperatorProfile(nextOp);
         setOperator(nextOp);
+        await fetch('/api/presence', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Device-Id': deviceId,
+            'X-Device-Name': deviceName,
+          },
+          body: JSON.stringify({
+            clientId: user.clientId,
+            deviceId,
+            deviceName,
+            serverUserId: user.id,
+            name: user.name,
+            role: user.role,
+            color: user.color,
+            activeView,
+          }),
+        }).catch(() => {});
         notify(`Signed in via shared server link as ${user.name} (${user.accessLevel}).`);
         refresh();
       })
       .catch((err) => {
         notify((err as Error).message, 'error');
       });
-  }, [refresh]);
+  }, [refresh, activeView]);
 
   // Keep local operator linked with live DB ServerUser updates
   useEffect(() => {
     if (!currentServerUser) return;
+    const deviceId = operator.deviceId || getOrCreateDeviceId();
+    const deviceName = operator.deviceName || detectDeviceName();
     const snapshot = `${currentServerUser.id}|${currentServerUser.name}|${currentServerUser.role}|${currentServerUser.color}|${currentServerUser.inviteToken}`;
     if (lastSyncedUserRef.current === snapshot) return;
     lastSyncedUserRef.current = snapshot;
 
     const nextOp: OperatorProfile = {
-      clientId: operator.clientId || currentServerUser.clientId,
+      clientId: currentServerUser.clientId,
+      deviceId,
+      deviceName,
       serverUserId: currentServerUser.id,
       inviteToken: currentServerUser.inviteToken,
       name: currentServerUser.name,
@@ -196,11 +227,23 @@ export default function App() {
     };
     saveOperatorProfile(nextOp);
     setOperator(nextOp);
-  }, [currentServerUser, operator.clientId]);
+  }, [currentServerUser, operator.deviceId, operator.deviceName]);
 
-  const handleSwitchServerUser = (u: ServerUser) => {
+  const handleSwitchServerUser = async (u: ServerUser) => {
+    const deviceId = operator.deviceId || getOrCreateDeviceId();
+    const deviceName = operator.deviceName || detectDeviceName();
+    if (currentServerUser && currentServerUser.id !== u.id) {
+      await fetch('/api/presence/leave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Device-Id': deviceId },
+        body: JSON.stringify({ serverUserId: currentServerUser.id, deviceId }),
+      }).catch(() => {});
+    }
+
     const nextOp: OperatorProfile = {
       clientId: u.clientId,
+      deviceId,
+      deviceName,
       serverUserId: u.id,
       inviteToken: u.inviteToken,
       name: u.name,
@@ -214,7 +257,57 @@ export default function App() {
     setOpRoleInput(u.role);
     setOpColorInput(u.color);
     setShowProfileModal(false);
-    notify(`Switched active server user to ${u.name} (${u.accessLevel}).`);
+
+    await fetch('/api/presence', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Device-Id': deviceId,
+        'X-Device-Name': deviceName,
+      },
+      body: JSON.stringify({
+        clientId: u.clientId,
+        deviceId,
+        deviceName,
+        serverUserId: u.id,
+        name: u.name,
+        role: u.role,
+        color: u.color,
+        activeView,
+        editingKey,
+      }),
+    }).catch(() => {});
+
+    notify(`Active on ${deviceName} as ${u.name} (${u.accessLevel}).`);
+    refresh();
+  };
+
+  const handleLeaveAccount = async () => {
+    const deviceId = operator.deviceId || getOrCreateDeviceId();
+    const deviceName = operator.deviceName || detectDeviceName();
+    if (currentServerUser) {
+      await fetch('/api/presence/leave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Device-Id': deviceId },
+        body: JSON.stringify({ serverUserId: currentServerUser.id, deviceId }),
+      }).catch(() => {});
+    }
+    const cleared: OperatorProfile = {
+      clientId: deviceId,
+      deviceId,
+      deviceName,
+      name: '',
+      role: 'Team Member',
+      color: operator.color || OPERATOR_COLORS[0],
+    };
+    lastSyncedUserRef.current = '';
+    saveOperatorProfile(cleared);
+    setOperator(cleared);
+    setProfileMode('create');
+    setOpNameInput('');
+    setOpRoleInput('Team Member');
+    notify('Signed out of operator account on this device.');
+    refresh();
   };
 
   const openOperatorModal = (mode?: 'create' | 'edit') => {
@@ -235,6 +328,8 @@ export default function App() {
   const handleSaveProfile = async () => {
     const cleanName = opNameInput.trim();
     const cleanRole = opRoleInput.trim() || 'Team Member';
+    const deviceId = operator.deviceId || getOrCreateDeviceId();
+    const deviceName = operator.deviceName || detectDeviceName();
     if (!cleanName) {
       notify('Enter your operator name first.', 'error');
       return;
@@ -255,6 +350,8 @@ export default function App() {
         if (!res.ok) throw new Error(data.error || 'Failed to update team member account');
         const updated: OperatorProfile = {
           clientId: data.clientId,
+          deviceId,
+          deviceName,
           serverUserId: data.id,
           inviteToken: data.inviteToken,
           name: data.name,
@@ -270,17 +367,20 @@ export default function App() {
         return;
       }
 
-      // Add a new team member account to the server and immediately use it on this device
+      // Add a new team member account (or bind existing exact name) on this device + IP
       const res = await apiFetch('/api/server-users', {
         method: 'POST',
         body: JSON.stringify({
-          clientId: operator.clientId,
           name: cleanName,
           role: cleanRole,
           accessLevel: 'EDITOR',
           canEdit: true,
           color: opColorInput,
           addedBy: cleanName,
+          bindDevice: true,
+          deviceId,
+          deviceName,
+          activeView,
         }),
       });
       const created = (await res.json()) as ServerUser & { error?: string };
@@ -288,6 +388,8 @@ export default function App() {
 
       const nextOp: OperatorProfile = {
         clientId: created.clientId,
+        deviceId,
+        deviceName,
         serverUserId: created.id,
         inviteToken: created.inviteToken,
         name: created.name,
@@ -298,7 +400,7 @@ export default function App() {
       saveOperatorProfile(nextOp);
       setOperator(nextOp);
       setShowProfileModal(false);
-      notify(`Added ${created.name} and active as team member.`);
+      notify(`Online on ${deviceName} as ${created.name}.`);
       refresh();
     } catch (err) {
       notify((err as Error).message, 'error');
@@ -850,6 +952,8 @@ export default function App() {
               onlineMembers={onlineMembers}
               activityLog={activityLog}
               currentClientId={operator.clientId}
+              currentDeviceId={operator.deviceId}
+              currentDeviceName={operator.deviceName}
               currentServerUserId={currentServerUser?.id}
               savingToServer={savingToServer}
               onSaveToServer={handleSaveToServer}
@@ -993,26 +1097,39 @@ export default function App() {
                 </div>
               )}
             </div>
-            <div className="flex justify-end gap-2 border-t border-slate-200 px-4 py-3 bg-slate-50">
-              <button
-                type="button"
-                onClick={() => setShowProfileModal(false)}
-                className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={savingProfile}
-                onClick={handleSaveProfile}
-                className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer disabled:opacity-60"
-              >
-                {savingProfile
-                  ? 'Saving...'
-                  : profileMode === 'edit' && currentServerUser
-                    ? 'Update Team Account'
-                    : 'Add & Use Account'}
-              </button>
+            <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 bg-slate-50">
+              <div>
+                {currentServerUser && (
+                  <button
+                    type="button"
+                    onClick={handleLeaveAccount}
+                    className="border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 cursor-pointer"
+                  >
+                    Sign Out
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowProfileModal(false)}
+                  className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={savingProfile}
+                  onClick={handleSaveProfile}
+                  className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer disabled:opacity-60"
+                >
+                  {savingProfile
+                    ? 'Saving...'
+                    : profileMode === 'edit' && currentServerUser
+                      ? 'Update Team Account'
+                      : 'Add & Use Account'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

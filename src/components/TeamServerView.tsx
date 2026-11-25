@@ -44,6 +44,8 @@ interface TeamServerViewProps {
   onlineMembers: PresenceMember[];
   activityLog: ActivityLogEntry[];
   currentClientId: string;
+  currentDeviceId?: string;
+  currentDeviceName?: string;
   currentServerUserId?: number;
   savingToServer: boolean;
   onSaveToServer: (label?: string) => Promise<void>;
@@ -78,6 +80,8 @@ export function TeamServerView({
   onlineMembers,
   activityLog,
   currentClientId,
+  currentDeviceId,
+  currentDeviceName,
   currentServerUserId,
   savingToServer,
   onSaveToServer,
@@ -244,7 +248,6 @@ export function TeamServerView({
       const res = await apiFetch('/api/server-users', {
         method: 'POST',
         body: JSON.stringify({
-          clientId: useNewUserOnDevice ? currentClientId : undefined,
           name: newUserName.trim(),
           email: newUserEmail.trim(),
           role: newUserRole.trim() || 'Team Member',
@@ -252,6 +255,10 @@ export function TeamServerView({
           canEdit: newUserAccess !== 'VIEWER',
           color: newUserColor,
           addedBy: useNewUserOnDevice ? newUserName.trim() : undefined,
+          bindDevice: useNewUserOnDevice,
+          deviceId: useNewUserOnDevice ? currentDeviceId : undefined,
+          deviceName: useNewUserOnDevice ? currentDeviceName : undefined,
+          activeView: 'team',
         }),
       });
       const data = await res.json();
@@ -259,7 +266,7 @@ export function TeamServerView({
 
       if (useNewUserOnDevice) {
         onSwitchUser(data);
-        onNotify(`Added ${data.name} and set as your active team member account.`);
+        onNotify(`Added ${data.name} and active on this device.`);
       } else {
         const base = selectedUrl || browserOrigin;
         const inviteLink = `${base}/?invite=${data.inviteToken}`;
@@ -491,9 +498,12 @@ export function TeamServerView({
               </div>
             ) : (
               onlineMembers.map((m) => {
-                const isSelf = m.clientId === currentClientId;
+                const isSelf =
+                  (currentServerUserId !== undefined && m.serverUserId === currentServerUserId) ||
+                  (currentDeviceId ? m.deviceId === currentDeviceId : false) ||
+                  m.clientId === currentClientId;
                 return (
-                  <div key={m.clientId} className="px-4 py-3 flex items-center justify-between gap-3 text-xs">
+                  <div key={`${m.serverUserId ?? m.clientId}-${m.deviceId ?? ''}`} className="px-4 py-3 flex items-center justify-between gap-3 text-xs">
                     <div className="flex items-center gap-2.5 min-w-0">
                       <span
                         className="h-7 w-7 rounded-full text-white font-bold flex items-center justify-center shrink-0 text-[11px]"
@@ -505,10 +515,21 @@ export function TeamServerView({
                         <div className="font-semibold text-slate-900 truncate">
                           {m.name} {isSelf && <span className="text-amber-600 font-normal">(You)</span>}
                         </div>
-                        <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
+                        <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap">
                           <span>{m.role}</span>
                           <span>·</span>
                           <span className="uppercase font-mono text-slate-700">{m.activeView}</span>
+                        </div>
+                        <div className="mt-0.5 text-[10px] text-slate-500 flex items-center gap-1.5 flex-wrap">
+                          <span className="inline-flex items-center gap-1 text-slate-700">
+                            <Smartphone className="h-3 w-3 text-slate-400" />
+                            {m.deviceName || 'Web Device'}
+                          </span>
+                          {m.deviceIp && (
+                            <span className="font-mono bg-slate-100 border border-slate-200 px-1.5 py-0.2 text-slate-700">
+                              IP: {m.deviceIp}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -521,7 +542,7 @@ export function TeamServerView({
                       ) : (
                         <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-medium">
                           <Monitor className="h-3 w-3" />
-                          Active
+                          Online Live
                         </span>
                       )}
                     </div>
@@ -692,6 +713,7 @@ export function TeamServerView({
               <tr className="border-b border-slate-200 bg-slate-50 text-slate-600 font-semibold">
                 <th className="px-4 py-2.5">Server User</th>
                 <th className="px-4 py-2.5">Station / Role</th>
+                <th className="px-4 py-2.5">Device &amp; IP</th>
                 <th className="px-4 py-2.5">Live Status</th>
                 <th className="px-4 py-2.5">Permission</th>
                 <th className="px-4 py-2.5">Shared By</th>
@@ -701,8 +723,8 @@ export function TeamServerView({
             <tbody className="divide-y divide-slate-100">
               {serverUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-slate-500">
-                    Loading live server users...
+                  <td colSpan={7} className="px-4 py-6 text-center text-slate-500">
+                    No team member accounts yet. Add your operator name to join the live server.
                   </td>
                 </tr>
               ) : (
@@ -763,6 +785,24 @@ export function TeamServerView({
                       </td>
 
                       <td className="px-4 py-2.5 text-slate-700">{u.role}</td>
+
+                      <td className="px-4 py-2.5 whitespace-nowrap">
+                        {u.deviceName || u.deviceIp ? (
+                          <div className="space-y-0.5">
+                            <div className="text-slate-800 font-medium flex items-center gap-1">
+                              <Smartphone className="h-3 w-3 text-slate-400 shrink-0" />
+                              <span>{u.deviceName || 'Web Device'}</span>
+                            </div>
+                            {u.deviceIp && (
+                              <div className="font-mono text-[10px] text-slate-500">
+                                {u.deviceIp}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-slate-400">Unassigned</span>
+                        )}
+                      </td>
 
                       <td className="px-4 py-2.5 whitespace-nowrap">
                         {u.isOnline ? (

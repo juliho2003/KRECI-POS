@@ -25,6 +25,7 @@ import {
   deleteSharedDraft,
   dispatchReservedRental,
   exportFullBackup,
+  getActivePresenceMembersFromDb,
   getActivityLog,
   getBudgetRequests,
   getBusinesses,
@@ -41,9 +42,11 @@ import {
   getServerSettings,
   getServerUserByClientId,
   getServerUserById,
+  getServerUserByName,
   getServerUserByToken,
   getServerUsers,
   getSharedDrafts,
+  leaveServerUserPresence,
   logActivity,
   processReturnInspection,
   restoreFullBackup,
@@ -64,6 +67,7 @@ import {
   updateServerUser,
   updateSharedDraft,
 } from './db.ts';
+import type http from 'http';
 import type { PresenceMember, RealtimeEventType, RealtimeMessage, ServerUser } from '../src/types.ts';
 
 export interface CreateApiAppOptions {
@@ -74,8 +78,30 @@ export interface CreateApiAppOptions {
   getLanUrls?: (port: number) => string[];
   getOnlineMembers?: () => PresenceMember[];
   onUserUpdated?: (updated: ServerUser) => void;
+  onPresenceTouched?: (user: ServerUser, deviceIp: string) => void;
+  onPresenceLeft?: (info: { serverUserId?: number | null; deviceId?: string }) => void;
   broadcast?: (type: RealtimeEventType, detail?: string, extra?: Partial<RealtimeMessage>) => void;
   broadcastPresence?: () => void;
+}
+
+export function extractClientIp(req: { headers?: http.IncomingHttpHeaders; socket?: { remoteAddress?: string } }): string {
+  const headers = req.headers || {};
+  const nfIp = headers['x-nf-client-connection-ip'];
+  const cfIp = headers['cf-connecting-ip'];
+  const xff = headers['x-forwarded-for'];
+  const xRealIp = headers['x-real-ip'];
+  let raw = '';
+  if (typeof nfIp === 'string' && nfIp.trim()) raw = nfIp.trim();
+  else if (typeof cfIp === 'string' && cfIp.trim()) raw = cfIp.trim();
+  else if (typeof xff === 'string' && xff.trim()) raw = xff.split(',')[0].trim();
+  else if (Array.isArray(xff) && xff[0]) raw = xff[0].split(',')[0].trim();
+  else if (typeof xRealIp === 'string' && xRealIp.trim()) raw = xRealIp.trim();
+  else if (req.socket?.remoteAddress) raw = req.socket.remoteAddress;
+
+  if (!raw) return '127.0.0.1';
+  if (raw.startsWith('::ffff:')) raw = raw.slice(7);
+  if (raw === '::1') return '127.0.0.1';
+  return raw;
 }
 
 function extractApiToken(req: express.Request): string {
@@ -110,28 +136,8 @@ function getActor(req: express.Request): string {
   return 'Team Member';
 }
 
-function getPollingOnlineMembers(maxAgeMs = 60_000): PresenceMember[] {
-  const nowMs = Date.now();
-  const users = getServerUsers();
-  return users
-    .filter((u) => {
-      if (u.status !== 'ACTIVE') return false;
-      const seenMs = Date.parse(u.lastSeenAt);
-      return Number.isFinite(seenMs) && nowMs - seenMs <= maxAgeMs;
-    })
-    .map((u) => ({
-      clientId: u.clientId,
-      serverUserId: u.id,
-      name: u.name,
-      role: u.role,
-      color: u.color,
-      accessLevel: u.accessLevel,
-      canEdit: u.status === 'ACTIVE' && u.canEdit,
-      activeView: u.activeView ?? 'pos',
-      editingKey: u.editingKey ?? null,
-      connectedAt: u.lastSeenAt,
-      lastSeenAt: u.lastSeenAt,
-    }));
+function getPollingOnlineMembers(maxAgeMs = 120_000): PresenceMember[] {
+  return getActivePresenceMembersFromDb(maxAgeMs);
 }
 
 export function createApiApp(options: CreateApiAppOptions): express.Express {
@@ -168,6 +174,9 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
         isOnline: Boolean(live),
         activeView: live?.activeView ?? u.activeView ?? undefined,
         editingKey: live?.editingKey ?? u.editingKey ?? null,
+        deviceId: live?.deviceId ?? u.deviceId ?? '',
+        deviceName: live?.deviceName ?? u.deviceName ?? '',
+        deviceIp: live?.deviceIp ?? u.deviceIp ?? '',
         lastSeenAt: live?.lastSeenAt ?? u.lastSeenAt,
       };
     });
@@ -179,7 +188,7 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, X-API-Key, X-Save-Pin, X-Team-Pin, X-Operator-Name, X-Client-Id, X-Server-User-Id'
+      'Content-Type, Authorization, X-API-Key, X-Save-Pin, X-Team-Pin, X-Operator-Name, X-Client-Id, X-Server-User-Id, X-Device-Id, X-Device-Name'
     );
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -208,7 +217,7 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
       next();
       return;
     }
-    if (req.path === '/auth/verify-pin' || req.path === '/presence') {
+    if (req.path === '/auth/verify-pin' || req.path === '/presence' || req.path === '/presence/leave') {
       next();
       return;
     }
@@ -262,8 +271,11 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
       const color = String(req.body?.color || '#d97706');
       const activeView = req.body?.activeView ? String(req.body.activeView) : 'pos';
       const editingKey = req.body?.editingKey !== undefined ? (req.body.editingKey ? String(req.body.editingKey) : null) : null;
+      const deviceId = String(req.body?.deviceId || req.header('x-device-id') || clientId || '').slice(0, 80);
+      const deviceName = String(req.body?.deviceName || req.header('x-device-name') || '').slice(0, 80);
+      const deviceIp = extractClientIp(req);
 
-      const user = clientId
+      const user = (serverUserId || clientId)
         ? touchServerUserPresence({
             clientId,
             serverUserId,
@@ -273,12 +285,39 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
             syncProfile: Boolean(req.body?.syncProfile),
             activeView,
             editingKey,
+            deviceId,
+            deviceName,
+            deviceIp,
           })
         : undefined;
+
+      if (user && user.status === 'ACTIVE') {
+        options.onPresenceTouched?.(user, deviceIp);
+        broadcastPresence();
+      }
 
       res.json({
         ok: true,
         user: user ?? null,
+        deviceIp,
+        members: getOnlineMembers(),
+        serverUsers: getEnrichedServerUsers(),
+      });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post('/api/presence/leave', (req, res) => {
+    try {
+      const serverUserId = req.body?.serverUserId ?? (req.header('x-server-user-id') ? Number(req.header('x-server-user-id')) : null);
+      const deviceId = String(req.body?.deviceId || req.header('x-device-id') || '').trim();
+      leaveServerUserPresence({ serverUserId, deviceId });
+      options.onPresenceLeft?.({ serverUserId, deviceId });
+      broadcastPresence();
+      broadcast('users:updated', 'left');
+      res.json({
+        ok: true,
         members: getOnlineMembers(),
         serverUsers: getEnrichedServerUsers(),
       });
@@ -541,6 +580,32 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
         return;
       }
       const actor = getActor(req);
+      const bindDevice = Boolean(req.body.bindDevice);
+      const deviceId = String(req.body?.deviceId || req.header('x-device-id') || '').slice(0, 80);
+      const deviceName = String(req.body?.deviceName || req.header('x-device-name') || '').slice(0, 80);
+      const deviceIp = extractClientIp(req);
+
+      // If joining/binding from a device and the same operator name already exists, bind to that existing account instead of creating duplicates
+      const existingByName = getServerUserByName(String(req.body.name));
+      if (bindDevice && existingByName) {
+        const bound = touchServerUserPresence({
+          clientId: existingByName.clientId,
+          serverUserId: existingByName.id,
+          name: existingByName.name,
+          role: existingByName.role,
+          color: existingByName.color,
+          activeView: typeof req.body.activeView === 'string' ? req.body.activeView : 'dashboard',
+          deviceId,
+          deviceName,
+          deviceIp,
+        }) ?? existingByName;
+        options.onPresenceTouched?.(bound, deviceIp);
+        broadcastPresence();
+        broadcast('users:updated', bound.name);
+        res.status(200).json(bound);
+        return;
+      }
+
       const user = createServerUser({
         clientId: typeof req.body.clientId === 'string' ? req.body.clientId : undefined,
         name: req.body.name,
@@ -550,7 +615,15 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
         accessLevel: req.body.accessLevel,
         canEdit: req.body.canEdit,
         addedBy: typeof req.body.addedBy === 'string' && req.body.addedBy.trim() ? req.body.addedBy.trim() : actor,
+        deviceId: bindDevice ? deviceId : '',
+        deviceName: bindDevice ? deviceName : '',
+        deviceIp: bindDevice ? deviceIp : '',
+        onlineActive: bindDevice,
       });
+      if (bindDevice) {
+        options.onPresenceTouched?.(user, deviceIp);
+        broadcastPresence();
+      }
       logActivity(
         user.addedBy || actor,
         'USER',

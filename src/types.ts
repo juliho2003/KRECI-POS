@@ -301,6 +301,9 @@ export interface ServerUser {
   isOnline?: boolean;
   activeView?: string;
   editingKey?: string | null;
+  deviceId?: string;
+  deviceName?: string;
+  deviceIp?: string;
 }
 
 export interface PresenceMember {
@@ -313,6 +316,9 @@ export interface PresenceMember {
   canEdit?: boolean;
   activeView: string;
   editingKey?: string | null;
+  deviceId?: string;
+  deviceName?: string;
+  deviceIp?: string;
   connectedAt: string;
   lastSeenAt: string;
 }

@@ -186,11 +186,16 @@ export function useRealtimePOS(
           if (srvData) setServerInfo(srvData);
         });
       } else if (type === 'users:updated') {
-        scopePromise = fetch('/api/server-users')
-          .then((r) => (r.ok ? r.json() : null))
-          .then((data) => {
-            if (data) setServerUsers(data);
-          });
+        scopePromise = Promise.all([
+          fetch('/api/server-users').then((r) => (r.ok ? r.json() : null)),
+          fetch('/api/server-info').then((r) => (r.ok ? r.json() : null)),
+        ]).then(([usersData, srvData]) => {
+          if (usersData) setServerUsers(usersData);
+          if (srvData) {
+            setServerInfo(srvData);
+            if (srvData.onlineMembers) setOnlineMembers(srvData.onlineMembers);
+          }
+        });
       } else if (type === 'business:updated') {
         scopePromise = fetch('/api/businesses')
           .then((r) => (r.ok ? r.json() : null))
@@ -214,15 +219,22 @@ export function useRealtimePOS(
   const sendPresenceHttp = useCallback(async (forceSyncProfile = false) => {
     try {
       const { operator: op, activeView: view, editingKey: editKey } = presenceRef.current;
-      const profileKey = `${op.clientId}|${op.name}|${op.role}|${op.color}`;
+      if (!op.serverUserId && !op.name.trim()) return;
+      const profileKey = `${op.clientId}|${op.serverUserId ?? ''}|${op.name}|${op.role}|${op.color}`;
       const changed = Boolean(prevProfileKeyRef.current && prevProfileKeyRef.current !== profileKey);
       prevProfileKeyRef.current = profileKey;
 
       const res = await fetch('/api/presence', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Device-Id': op.deviceId,
+          'X-Device-Name': op.deviceName,
+        },
         body: JSON.stringify({
           clientId: op.clientId,
+          deviceId: op.deviceId,
+          deviceName: op.deviceName,
           serverUserId: op.serverUserId ?? null,
           name: op.name,
           role: op.role,
@@ -236,23 +248,29 @@ export function useRealtimePOS(
         const data = (await res.json()) as { members?: PresenceMember[]; serverUsers?: ServerUser[] };
         if (data.members) setOnlineMembers(data.members);
         if (data.serverUsers) setServerUsers(data.serverUsers);
-        setWsStatus('connected');
+        if (realtimeMode === 'polling') {
+          setWsStatus('connected');
+        }
       }
     } catch {
       // ignore transient polling presence errors
     }
-  }, []);
+  }, [realtimeMode]);
 
   const sendPresence = useCallback(
     (forceSyncProfile = false) => {
+      const { operator: op, activeView: view, editingKey: editKey } = presenceRef.current;
+      if (!op.serverUserId && !op.name.trim()) return;
       if (realtimeMode === 'polling') {
         void sendPresenceHttp(forceSyncProfile);
         return;
       }
       const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const { operator: op, activeView: view, editingKey: editKey } = presenceRef.current;
-      const profileKey = `${op.clientId}|${op.name}|${op.role}|${op.color}`;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        void sendPresenceHttp(forceSyncProfile);
+        return;
+      }
+      const profileKey = `${op.clientId}|${op.serverUserId ?? ''}|${op.name}|${op.role}|${op.color}`;
       const changed = Boolean(prevProfileKeyRef.current && prevProfileKeyRef.current !== profileKey);
       prevProfileKeyRef.current = profileKey;
 
@@ -260,6 +278,8 @@ export function useRealtimePOS(
         JSON.stringify({
           kind: 'presence',
           clientId: op.clientId,
+          deviceId: op.deviceId,
+          deviceName: op.deviceName,
           serverUserId: op.serverUserId ?? null,
           name: op.name,
           role: op.role,
@@ -279,7 +299,18 @@ export function useRealtimePOS(
 
   useEffect(() => {
     sendPresence(false);
-  }, [operator.clientId, operator.serverUserId, operator.name, operator.role, operator.color, activeView, editingKey, sendPresence]);
+  }, [
+    operator.clientId,
+    operator.deviceId,
+    operator.deviceName,
+    operator.serverUserId,
+    operator.name,
+    operator.role,
+    operator.color,
+    activeView,
+    editingKey,
+    sendPresence,
+  ]);
 
   useEffect(() => {
     if (!realtimeMode) return;
@@ -357,8 +388,11 @@ export function useRealtimePOS(
                   return {
                     ...u,
                     isOnline: Boolean(live),
-                    activeView: live?.activeView ?? undefined,
+                    activeView: live?.activeView ?? u.activeView ?? undefined,
                     editingKey: live?.editingKey ?? null,
+                    deviceId: live?.deviceId ?? u.deviceId,
+                    deviceName: live?.deviceName ?? u.deviceName,
+                    deviceIp: live?.deviceIp ?? u.deviceIp,
                     lastSeenAt: live?.lastSeenAt ?? u.lastSeenAt,
                   };
                 })
@@ -391,7 +425,7 @@ export function useRealtimePOS(
 
     connect();
 
-    // Keep Safari / iOS mobile WebSockets alive across idle periods
+    // Keep Safari / iOS mobile WebSockets alive and fall back to HTTP presence when needed
     heartbeatTimer = window.setInterval(() => {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -400,8 +434,11 @@ export function useRealtimePOS(
         } catch {
           ws.close();
         }
-      } else if (!document.hidden) {
-        connect();
+      } else {
+        void sendPresenceHttp(false);
+        if (!document.hidden) {
+          connect();
+        }
       }
     }, 25000);
 

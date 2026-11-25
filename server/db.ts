@@ -340,6 +340,10 @@ export function initDatabase(): void {
   ensureColumn('shared_drafts', 'business_id', "TEXT NOT NULL DEFAULT 'kr-oncue'");
   ensureColumn('server_users', 'active_view', "TEXT NOT NULL DEFAULT 'pos'");
   ensureColumn('server_users', 'editing_key', 'TEXT');
+  ensureColumn('server_users', 'device_id', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('server_users', 'device_name', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('server_users', 'device_ip', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('server_users', 'online_active', 'INTEGER NOT NULL DEFAULT 0');
 
   const nowInit = new Date().toISOString();
   db.prepare(
@@ -2840,8 +2844,12 @@ function mapServerUserRow(r: Record<string, unknown>): ServerUser {
     addedBy: String(r.added_by ?? 'Host'),
     lastSeenAt: String(r.last_seen_at),
     createdAt: String(r.created_at),
+    isOnline: Boolean(r.online_active),
     activeView: r.active_view ? String(r.active_view) : undefined,
     editingKey: r.editing_key ? String(r.editing_key) : null,
+    deviceId: String(r.device_id ?? ''),
+    deviceName: String(r.device_name ?? ''),
+    deviceIp: String(r.device_ip ?? ''),
   };
 }
 
@@ -2875,6 +2883,15 @@ export function getServerUserByToken(token: string): ServerUser | undefined {
   return row ? mapServerUserRow(row) : undefined;
 }
 
+export function getServerUserByName(name: string): ServerUser | undefined {
+  const clean = name.trim().toLowerCase();
+  if (!clean) return undefined;
+  const row = db
+    .prepare("SELECT * FROM server_users WHERE LOWER(TRIM(name)) = ? AND status = 'ACTIVE' LIMIT 1")
+    .get(clean) as Record<string, unknown> | undefined;
+  return row ? mapServerUserRow(row) : undefined;
+}
+
 export function createServerUser(input: {
   clientId?: string;
   name: string;
@@ -2884,6 +2901,10 @@ export function createServerUser(input: {
   accessLevel?: ServerUserAccess;
   canEdit?: boolean;
   addedBy?: string;
+  deviceId?: string;
+  deviceName?: string;
+  deviceIp?: string;
+  onlineActive?: boolean;
 }): ServerUser {
   const now = new Date().toISOString();
   const accessLevel: ServerUserAccess = input.accessLevel ?? 'EDITOR';
@@ -2893,13 +2914,22 @@ export function createServerUser(input: {
     clientId = `user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   }
   const inviteToken = makeToken();
+  const deviceId = (input.deviceId ?? '').trim();
+  const deviceName = (input.deviceName ?? '').trim();
+  const deviceIp = (input.deviceIp ?? '').trim();
+  const onlineActive = input.onlineActive ? 1 : 0;
+
+  if (onlineActive && deviceId) {
+    db.prepare('UPDATE server_users SET online_active = 0 WHERE device_id = ?').run(deviceId);
+  }
 
   const res = db
     .prepare(`
       INSERT INTO server_users (
         client_id, name, email, role, color, access_level, can_edit, status,
-        invite_token, added_by, last_seen_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)
+        invite_token, added_by, last_seen_at, created_at,
+        device_id, device_name, device_ip, online_active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       clientId,
@@ -2912,7 +2942,11 @@ export function createServerUser(input: {
       inviteToken,
       input.addedBy ?? 'Host',
       now,
-      now
+      now,
+      deviceId,
+      deviceName,
+      deviceIp,
+      onlineActive
     );
   return getServerUserById(Number(res.lastInsertRowid))!;
 }
@@ -2983,6 +3017,9 @@ export function touchServerUserPresence(input: {
   syncProfile?: boolean;
   activeView?: string;
   editingKey?: string | null;
+  deviceId?: string;
+  deviceName?: string;
+  deviceIp?: string;
 }): ServerUser | undefined {
   const now = new Date().toISOString();
   let user = input.serverUserId ? getServerUserById(input.serverUserId) : undefined;
@@ -2992,13 +3029,27 @@ export function touchServerUserPresence(input: {
   if (!user) {
     return undefined;
   }
+  if (user.status === 'REVOKED') {
+    db.prepare('UPDATE server_users SET online_active = 0 WHERE id = ?').run(user.id);
+    return getServerUserById(user.id);
+  }
 
   const activeView = input.activeView ?? user.activeView ?? 'pos';
   const editingKey = input.editingKey !== undefined ? input.editingKey : (user.editingKey ?? null);
+  const deviceId = (input.deviceId ?? '').trim() || user.deviceId || '';
+  const deviceName = (input.deviceName ?? '').trim() || user.deviceName || '';
+  const deviceIp = (input.deviceIp ?? '').trim() || user.deviceIp || '';
+
+  if (deviceId) {
+    db.prepare('UPDATE server_users SET online_active = 0 WHERE device_id = ? AND id != ?').run(deviceId, user.id);
+  }
 
   if (input.syncProfile && input.name.trim()) {
     db.prepare(
-      'UPDATE server_users SET last_seen_at = ?, name = ?, role = ?, color = ?, active_view = ?, editing_key = ? WHERE id = ?'
+      `UPDATE server_users
+       SET last_seen_at = ?, online_active = 1, name = ?, role = ?, color = ?,
+           active_view = ?, editing_key = ?, device_id = ?, device_name = ?, device_ip = ?
+       WHERE id = ?`
     ).run(
       now,
       input.name.trim() || user.name,
@@ -3006,16 +3057,69 @@ export function touchServerUserPresence(input: {
       input.color || user.color,
       activeView,
       editingKey,
+      deviceId,
+      deviceName,
+      deviceIp,
       user.id
     );
   } else {
-    db.prepare('UPDATE server_users SET last_seen_at = ?, active_view = ?, editing_key = ? WHERE id = ?').run(
-      now,
-      activeView,
-      editingKey,
-      user.id
-    );
+    db.prepare(
+      `UPDATE server_users
+       SET last_seen_at = ?, online_active = 1, active_view = ?, editing_key = ?,
+           device_id = ?, device_name = ?, device_ip = ?
+       WHERE id = ?`
+    ).run(now, activeView, editingKey, deviceId, deviceName, deviceIp, user.id);
   }
   return getServerUserById(user.id);
+}
+
+export function leaveServerUserPresence(input: {
+  serverUserId?: number | null;
+  deviceId?: string;
+}): void {
+  const deviceId = (input.deviceId ?? '').trim();
+  if (input.serverUserId) {
+    if (deviceId) {
+      db.prepare("UPDATE server_users SET online_active = 0 WHERE id = ? AND (device_id = ? OR device_id = '')").run(
+        input.serverUserId,
+        deviceId
+      );
+    } else {
+      db.prepare('UPDATE server_users SET online_active = 0 WHERE id = ?').run(input.serverUserId);
+    }
+    return;
+  }
+  if (deviceId) {
+    db.prepare('UPDATE server_users SET online_active = 0 WHERE device_id = ?').run(deviceId);
+  }
+}
+
+export function getActivePresenceMembersFromDb(maxAgeMs = 120_000) {
+  const nowMs = Date.now();
+  const rows = db
+    .prepare("SELECT * FROM server_users WHERE status = 'ACTIVE' AND online_active = 1 ORDER BY last_seen_at DESC")
+    .all() as Array<Record<string, unknown>>;
+  return rows
+    .map(mapServerUserRow)
+    .filter((u) => {
+      const seenMs = Date.parse(u.lastSeenAt);
+      return Number.isFinite(seenMs) && nowMs - seenMs <= maxAgeMs;
+    })
+    .map((u) => ({
+      clientId: u.clientId,
+      serverUserId: u.id,
+      name: u.name,
+      role: u.role,
+      color: u.color,
+      accessLevel: u.accessLevel,
+      canEdit: u.status === 'ACTIVE' && u.canEdit,
+      activeView: u.activeView ?? 'pos',
+      editingKey: u.editingKey ?? null,
+      deviceId: u.deviceId || undefined,
+      deviceName: u.deviceName || undefined,
+      deviceIp: u.deviceIp || undefined,
+      connectedAt: u.lastSeenAt,
+      lastSeenAt: u.lastSeenAt,
+    }));
 }
 

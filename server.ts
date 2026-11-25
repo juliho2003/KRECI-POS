@@ -4,8 +4,13 @@ import os from 'os';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
-import { createApiApp } from './server/createApp.ts';
-import { initDatabase, setDatabaseDriver, touchServerUserPresence } from './server/db.ts';
+import { createApiApp, extractClientIp } from './server/createApp.ts';
+import {
+  getActivePresenceMembersFromDb,
+  initDatabase,
+  setDatabaseDriver,
+  touchServerUserPresence,
+} from './server/db.ts';
 import { createNodeSqliteDriver } from './server/nodeDriver.ts';
 import type { PresenceMember, RealtimeEventType, RealtimeMessage, ServerUser } from './src/types.ts';
 
@@ -35,7 +40,21 @@ async function startServer() {
   initDatabase();
 
   const presenceMap = new Map<WebSocket, PresenceMember>();
-  const getOnlineMembers = (): PresenceMember[] => Array.from(presenceMap.values());
+  const getOnlineMembers = (): PresenceMember[] => {
+    const byUserId = new Map<number, PresenceMember>();
+    const dbActive = getActivePresenceMembersFromDb(120_000);
+    for (const m of dbActive) {
+      if (m.serverUserId) {
+        byUserId.set(m.serverUserId, m);
+      }
+    }
+    for (const m of presenceMap.values()) {
+      if (m.serverUserId) {
+        byUserId.set(m.serverUserId, m);
+      }
+    }
+    return Array.from(byUserId.values());
+  };
 
   let wss: WebSocketServer;
 
@@ -82,6 +101,36 @@ async function startServer() {
         }
       }
     },
+    onPresenceTouched: (touched: ServerUser, deviceIp: string) => {
+      for (const [sock, member] of presenceMap.entries()) {
+        if (touched.deviceId && member.deviceId === touched.deviceId && member.serverUserId !== touched.id) {
+          presenceMap.delete(sock);
+        } else if (member.serverUserId === touched.id) {
+          presenceMap.set(sock, {
+            ...member,
+            name: touched.name,
+            role: touched.role,
+            color: touched.color,
+            accessLevel: touched.accessLevel,
+            canEdit: touched.status === 'ACTIVE' && touched.canEdit,
+            deviceId: touched.deviceId || member.deviceId,
+            deviceName: touched.deviceName || member.deviceName,
+            deviceIp: deviceIp || touched.deviceIp || member.deviceIp,
+            lastSeenAt: touched.lastSeenAt,
+          });
+        }
+      }
+    },
+    onPresenceLeft: ({ serverUserId, deviceId }) => {
+      for (const [sock, member] of presenceMap.entries()) {
+        if (
+          (serverUserId && member.serverUserId === serverUserId) ||
+          (deviceId && member.deviceId === deviceId)
+        ) {
+          presenceMap.delete(sock);
+        }
+      }
+    },
   });
 
   const server = http.createServer(app);
@@ -96,8 +145,10 @@ async function startServer() {
     }
   });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, request) => {
     const now = new Date().toISOString();
+    const socketIp = extractClientIp(request);
+
     ws.send(
       JSON.stringify({
         type: 'presence:updated',
@@ -119,11 +170,27 @@ async function startServer() {
           syncProfile?: boolean;
           activeView?: string;
           editingKey?: string | null;
+          deviceId?: string;
+          deviceName?: string;
         };
         if (msg.kind === 'ping') {
           const prev = presenceMap.get(ws);
           if (prev) {
             prev.lastSeenAt = new Date().toISOString();
+            if (prev.serverUserId) {
+              touchServerUserPresence({
+                clientId: prev.clientId,
+                serverUserId: prev.serverUserId,
+                name: prev.name,
+                role: prev.role,
+                color: prev.color,
+                activeView: prev.activeView,
+                editingKey: prev.editingKey ?? null,
+                deviceId: prev.deviceId,
+                deviceName: prev.deviceName,
+                deviceIp: socketIp,
+              });
+            }
           }
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'presence:updated', timestamp: new Date().toISOString(), detail: 'pong' }));
@@ -136,8 +203,10 @@ async function startServer() {
           const name = (msg.name || prev?.name || '').slice(0, 40);
           const role = (msg.role || prev?.role || 'Team Member').slice(0, 32);
           const color = msg.color || prev?.color || '#d97706';
+          const deviceId = (msg.deviceId || prev?.deviceId || clientId).slice(0, 80);
+          const deviceName = (msg.deviceName || prev?.deviceName || '').slice(0, 80);
 
-          const dbUser = clientId
+          const dbUser = (msg.serverUserId || clientId)
             ? touchServerUserPresence({
                 clientId,
                 serverUserId: msg.serverUserId ?? prev?.serverUserId ?? null,
@@ -147,6 +216,9 @@ async function startServer() {
                 syncProfile: Boolean(msg.syncProfile),
                 activeView: msg.activeView || prev?.activeView || 'pos',
                 editingKey: msg.editingKey ?? null,
+                deviceId,
+                deviceName,
+                deviceIp: socketIp,
               })
             : undefined;
 
@@ -163,7 +235,8 @@ async function startServer() {
             prev.serverUserId !== dbUser.id ||
             prev.name !== dbUser.name ||
             prev.role !== dbUser.role ||
-            prev.color !== dbUser.color;
+            prev.color !== dbUser.color ||
+            prev.deviceIp !== socketIp;
 
           presenceMap.set(ws, {
             clientId: dbUser.clientId,
@@ -175,6 +248,9 @@ async function startServer() {
             canEdit: dbUser.status === 'ACTIVE' && dbUser.canEdit,
             activeView: msg.activeView || prev?.activeView || 'pos',
             editingKey: msg.editingKey ?? null,
+            deviceId: dbUser.deviceId || deviceId,
+            deviceName: dbUser.deviceName || deviceName,
+            deviceIp: dbUser.deviceIp || socketIp,
             connectedAt: prev?.connectedAt || new Date().toISOString(),
             lastSeenAt: new Date().toISOString(),
           });
@@ -191,8 +267,8 @@ async function startServer() {
     ws.on('close', () => {
       if (presenceMap.has(ws)) {
         presenceMap.delete(ws);
+        // Keep DB presence active within lease window so refreshes/brief WS reconnects don't drop live users
         broadcastPresence();
-        broadcast('users:updated', 'disconnected');
       }
     });
   });

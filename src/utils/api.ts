@@ -1,5 +1,7 @@
 export interface OperatorProfile {
   clientId: string;
+  deviceId: string;
+  deviceName: string;
   serverUserId?: number;
   inviteToken?: string;
   name: string;
@@ -8,6 +10,7 @@ export interface OperatorProfile {
 }
 
 const PROFILE_KEY = 'kr_oncue_operator_profile';
+const DEVICE_ID_KEY = 'kr_oncue_device_id';
 
 const AVATAR_COLORS = [
   '#d97706', // amber-600
@@ -19,22 +22,59 @@ const AVATAR_COLORS = [
   '#0d9488', // teal-600
 ];
 
-function generateClientId(): string {
-  return `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+function generateId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+export function getOrCreateDeviceId(): string {
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_KEY);
+    if (existing && existing.trim()) {
+      return existing.trim();
+    }
+    const created = generateId('dev');
+    localStorage.setItem(DEVICE_ID_KEY, created);
+    return created;
+  } catch {
+    return generateId('dev');
+  }
+}
+
+export function detectDeviceName(): string {
+  if (typeof navigator === 'undefined') return 'Web Browser';
+  const ua = navigator.userAgent || '';
+
+  let osLabel = 'Device';
+  if (/iPhone/i.test(ua)) osLabel = 'iPhone';
+  else if (/iPad/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) osLabel = 'iPad';
+  else if (/Android/i.test(ua)) osLabel = 'Android';
+  else if (/Macintosh|Mac OS X/i.test(ua)) osLabel = 'Mac';
+  else if (/Windows/i.test(ua)) osLabel = 'Windows PC';
+  else if (/Linux/i.test(ua)) osLabel = 'Linux';
+
+  let browserLabel = 'Browser';
+  if (/Edg\//i.test(ua)) browserLabel = 'Edge';
+  else if (/CriOS\//i.test(ua) || (/Chrome\//i.test(ua) && !/Edg\//i.test(ua))) browserLabel = 'Chrome';
+  else if (/FxiOS\//i.test(ua) || /Firefox\//i.test(ua)) browserLabel = 'Firefox';
+  else if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua)) browserLabel = 'Safari';
+
+  return `${osLabel} · ${browserLabel}`;
 }
 
 export function getOperatorProfile(): OperatorProfile {
-  let existingClientId = '';
+  const deviceId = getOrCreateDeviceId();
+  const deviceName = detectDeviceName();
   try {
     const raw = localStorage.getItem(PROFILE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<OperatorProfile>;
-      existingClientId = parsed.clientId || '';
       const isLegacyAutoName =
         !parsed.serverUserId && !parsed.inviteToken && /^Operator \d{2}$/.test(parsed.name || '');
       if (parsed.name && parsed.clientId && !isLegacyAutoName) {
         return {
           clientId: parsed.clientId,
+          deviceId: parsed.deviceId || deviceId,
+          deviceName: parsed.deviceName || deviceName,
           serverUserId: parsed.serverUserId,
           inviteToken: parsed.inviteToken,
           name: parsed.name,
@@ -47,7 +87,9 @@ export function getOperatorProfile(): OperatorProfile {
     // ignore storage errors
   }
   const initial: OperatorProfile = {
-    clientId: existingClientId || generateClientId(),
+    clientId: deviceId,
+    deviceId,
+    deviceName,
     name: '',
     role: 'Team Member',
     color: AVATAR_COLORS[0],
@@ -69,6 +111,8 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   const headers = new Headers(init.headers);
   headers.set('X-Operator-Name', encodeURIComponent(profile.name || 'Team Member'));
   headers.set('X-Client-Id', profile.clientId);
+  headers.set('X-Device-Id', profile.deviceId);
+  headers.set('X-Device-Name', profile.deviceName);
   if (profile.serverUserId) {
     headers.set('X-Server-User-Id', String(profile.serverUserId));
   }
