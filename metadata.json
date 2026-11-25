@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix KR-ONCUE Rental POS \u0026 Inventory System",
+  "description": "Real-time POS, master inventory tracking, quote generation, and client management for KR-ONCUE Audio, Lights and LED Wall rentals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

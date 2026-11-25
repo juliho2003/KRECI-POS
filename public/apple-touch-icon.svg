@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180">
+  <rect width="180" height="180" rx="36" fill="#0f172a"/>
+  <rect x="14" y="14" width="152" height="152" rx="28" fill="none" stroke="#d97706" stroke-width="4"/>
+  <text x="90" y="84" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="38" font-weight="800" fill="#ffffff" letter-spacing="1">KR</text>
+  <text x="90" y="118" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="700" fill="#f59e0b" letter-spacing="2">ONCUE</text>
+  <rect x="44" y="134" width="92" height="6" rx="3" fill="#10b981"/>
+</svg>
