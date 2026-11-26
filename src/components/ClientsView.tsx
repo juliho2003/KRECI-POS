@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pencil, Plus, Printer, Search, Trash2, X } from 'lucide-react';
 import type { Client, PresenceMember, Quote, Rental } from '../types';
 import { apiFetch } from '../utils/api';
@@ -40,6 +40,9 @@ export function ClientsView({
   const [address, setAddress] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [lastSavedTime, setLastSavedTime] = useState('');
+  const editSnapshotRef = useRef('');
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -56,6 +59,8 @@ export function ClientsView({
 
   const closeModal = () => {
     setShowModal(false);
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     onEditingChange(null);
   };
 
@@ -67,6 +72,9 @@ export function ClientsView({
     setEmail('');
     setAddress('');
     setNotes('');
+    editSnapshotRef.current = '';
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     setShowModal(true);
     onEditingChange('client:new');
   };
@@ -79,34 +87,89 @@ export function ClientsView({
     setEmail(c.email);
     setAddress(c.address);
     setNotes(c.notes);
+    editSnapshotRef.current = JSON.stringify({
+      name: c.name.trim(),
+      organization: c.organization,
+      contactNo: c.contactNo,
+      email: c.email,
+      address: c.address,
+      notes: c.notes,
+    });
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     setShowModal(true);
     onEditingChange(`client:${c.id}`);
   };
 
-  const handleSave = async () => {
-    if (!name.trim()) {
-      onNotify('Client name is required.', 'error');
-      return;
-    }
-    setSaving(true);
-    try {
-      const url = editing ? `/api/clients/${editing.id}` : '/api/clients';
-      const method = editing ? 'PATCH' : 'POST';
-      const res = await apiFetch(url, {
-        method,
-        body: JSON.stringify({ name, organization, contactNo, email, address, notes }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to save client');
-      onNotify(editing ? `Updated client ${data.name}.` : `Added client ${data.name}.`);
-      closeModal();
-      onRefresh();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
+  const persistEditClient = useCallback(
+    async (closeAfter: boolean) => {
+      if (!name.trim()) {
+        if (closeAfter) onNotify('Client name is required.', 'error');
+        return;
+      }
+      const payload = {
+        name: name.trim(),
+        organization,
+        contactNo,
+        email,
+        address,
+        notes,
+      };
+      const serialized = JSON.stringify(payload);
+      if (editing && serialized === editSnapshotRef.current) {
+        if (closeAfter) closeModal();
+        return;
+      }
+      if (closeAfter) setSaving(true);
+      if (editing) setAutoSaveStatus('saving');
+      try {
+        const url = editing ? `/api/clients/${editing.id}` : '/api/clients';
+        const method = editing ? 'PATCH' : 'POST';
+        const res = await apiFetch(url, {
+          method,
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to save client');
+        if (editing) {
+          editSnapshotRef.current = serialized;
+          setAutoSaveStatus('saved');
+          setLastSavedTime(new Date().toLocaleTimeString());
+        }
+        onRefresh();
+        if (closeAfter) {
+          onNotify(editing ? `Updated client ${data.name}.` : `Added client ${data.name}.`);
+          closeModal();
+        }
+      } catch (err) {
+        if (editing) setAutoSaveStatus('error');
+        if (closeAfter) onNotify((err as Error).message, 'error');
+      } finally {
+        if (closeAfter) setSaving(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editing, name, organization, contactNo, email, address, notes]
+  );
+
+  useEffect(() => {
+    if (!showModal || !editing || !name.trim()) return;
+    const currentSnapshot = JSON.stringify({
+      name: name.trim(),
+      organization,
+      contactNo,
+      email,
+      address,
+      notes,
+    });
+    if (currentSnapshot === editSnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistEditClient(false);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [showModal, editing, name, organization, contactNo, email, address, notes, persistEditClient]);
+
+  const handleSave = () => persistEditClient(true);
 
   const handleDelete = async (c: Client) => {
     try {
@@ -359,9 +422,21 @@ export function ClientsView({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
           <div className="w-full max-w-md bg-white border border-slate-200 shadow-lg">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-900">
-                {editing ? 'Edit Client Record' : 'New Client Record'}
-              </h3>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  {editing ? 'Edit Client Record' : 'New Client Record'}
+                </h3>
+                {editing && autoSaveStatus === 'saving' && (
+                  <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                    Auto-saving...
+                  </span>
+                )}
+                {editing && autoSaveStatus === 'saved' && (
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                    Auto-saved {lastSavedTime}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={closeModal}
@@ -434,7 +509,7 @@ export function ClientsView({
                 onClick={closeModal}
                 className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 cursor-pointer"
               >
-                Cancel
+                {editing ? 'Close' : 'Cancel'}
               </button>
               <button
                 type="button"
@@ -442,7 +517,7 @@ export function ClientsView({
                 onClick={handleSave}
                 className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
               >
-                {editing ? 'Save Changes' : 'Save Client'}
+                {editing ? 'Save & Close' : 'Save Client'}
               </button>
             </div>
           </div>

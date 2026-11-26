@@ -16,6 +16,7 @@ import type {
   ServerSavepoint,
   ServerUser,
   SharedDraft,
+  SyncStateResponse,
 } from '../types';
 import type { OperatorProfile } from '../utils/api';
 
@@ -45,7 +46,14 @@ export function useRealtimePOS(
   const [wsStatus, setWsStatus] = useState<WsStatus>('connecting');
   const [lastSyncAt, setLastSyncAt] = useState<string>('');
   const [realtimeMode, setRealtimeMode] = useState<'ws' | 'polling' | null>(null);
+  const [lastRemoteEvent, setLastRemoteEvent] = useState<{
+    actor: string;
+    summary: string;
+    type: string;
+    timestamp: string;
+  } | null>(null);
 
+  const lastRevisionRef = useRef<number>(0);
   const presenceRef = useRef({ operator, activeView, editingKey });
   presenceRef.current = { operator, activeView, editingKey };
 
@@ -97,6 +105,9 @@ export function useRealtimePOS(
       if (srvRes.ok) {
         const srv = (await srvRes.json()) as ServerInfo;
         setServerInfo(srv);
+        if (srv.revision) {
+          lastRevisionRef.current = Math.max(lastRevisionRef.current, srv.revision);
+        }
         if (srv.onlineMembers) setOnlineMembers(srv.onlineMembers);
         if (srv.realtimeMode) {
           setRealtimeMode((prev) => prev ?? srv.realtimeMode ?? 'ws');
@@ -206,11 +217,49 @@ export function useRealtimePOS(
 
       const [dashData] = await Promise.all([dashPromise, scopePromise]);
       if (dashData) setDashboard(dashData);
+      if (type !== 'activity:updated' && type !== 'presence:updated') {
+        void fetch('/api/activity')
+          .then((r) => (r.ok ? r.json() : null))
+          .then((act) => {
+            if (act) setActivityLog(act);
+          })
+          .catch(() => {});
+      }
       setLastSyncAt(new Date().toISOString());
     } catch {
       // Ignore transient network errors; next sync will refresh
     }
   }, []);
+
+  const pollSyncState = useCallback(async () => {
+    try {
+      const res = await fetch('/api/sync-state');
+      if (!res.ok) return;
+      const state = (await res.json()) as SyncStateResponse;
+      if (state.onlineMembers) setOnlineMembers(state.onlineMembers);
+      if (state.serverUsers) setServerUsers(state.serverUsers);
+      if (state.revision && state.revision !== lastRevisionRef.current) {
+        const hadRevision = lastRevisionRef.current > 0;
+        lastRevisionRef.current = state.revision;
+        if (
+          hadRevision &&
+          state.lastEvent &&
+          state.lastEvent.actor &&
+          state.lastEvent.actor !== presenceRef.current.operator.name
+        ) {
+          setLastRemoteEvent({
+            actor: state.lastEvent.actor,
+            summary: state.lastEvent.detail || state.lastEvent.type.replace(':updated', ' updated'),
+            type: state.lastEvent.type,
+            timestamp: state.lastEvent.timestamp,
+          });
+        }
+        await fetchAll();
+      }
+    } catch {
+      // ignore transient sync poll errors
+    }
+  }, [fetchAll]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -323,20 +372,20 @@ export function useRealtimePOS(
 
       const syncTimer = window.setInterval(() => {
         if (!unmounted && !document.hidden) {
-          void fetchAll();
+          void pollSyncState();
         }
-      }, 10000);
+      }, 3500);
 
       const presenceTimer = window.setInterval(() => {
         if (!unmounted && !document.hidden) {
           void sendPresenceHttp(false);
         }
-      }, 20000);
+      }, 15000);
 
       const handleWake = () => {
         if (unmounted || document.hidden) return;
         void sendPresenceHttp(false);
-        void fetchAll();
+        void pollSyncState();
       };
 
       document.addEventListener('visibilitychange', handleWake);
@@ -354,6 +403,7 @@ export function useRealtimePOS(
     }
 
     let heartbeatTimer: number | null = null;
+    let fallbackSyncTimer: number | null = null;
 
     const connect = () => {
       if (unmounted) return;
@@ -400,6 +450,21 @@ export function useRealtimePOS(
             }
             return;
           }
+          if (msg.revision) {
+            lastRevisionRef.current = Math.max(lastRevisionRef.current, msg.revision);
+          }
+          if (
+            msg.type !== 'activity:updated' &&
+            msg.actor &&
+            msg.actor !== presenceRef.current.operator.name
+          ) {
+            setLastRemoteEvent({
+              actor: msg.actor,
+              summary: msg.detail || msg.type.replace(':updated', ' updated'),
+              type: msg.type,
+              timestamp: msg.timestamp,
+            });
+          }
           if (msg.detail !== 'connected') {
             fetchScope(msg.type);
           }
@@ -424,6 +489,13 @@ export function useRealtimePOS(
     };
 
     connect();
+
+    // Fast revision & presence sync fallback so edits always appear on every online device even if WS is throttled
+    fallbackSyncTimer = window.setInterval(() => {
+      if (!unmounted && !document.hidden) {
+        void pollSyncState();
+      }
+    }, 3500);
 
     // Keep Safari / iOS mobile WebSockets alive and fall back to HTTP presence when needed
     heartbeatTimer = window.setInterval(() => {
@@ -450,8 +522,8 @@ export function useRealtimePOS(
         connect();
       } else {
         sendPresence(false);
-        fetchAll();
       }
+      void pollSyncState();
     };
 
     document.addEventListener('visibilitychange', handleWake);
@@ -461,6 +533,7 @@ export function useRealtimePOS(
     return () => {
       unmounted = true;
       if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (fallbackSyncTimer) clearInterval(fallbackSyncTimer);
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
@@ -469,7 +542,7 @@ export function useRealtimePOS(
       window.removeEventListener('online', handleWake);
       wsRef.current?.close();
     };
-  }, [realtimeMode, fetchAll, fetchScope, sendPresence, sendPresenceHttp]);
+  }, [realtimeMode, fetchAll, fetchScope, pollSyncState, sendPresence, sendPresenceHttp]);
 
   return {
     dashboard,
@@ -490,6 +563,7 @@ export function useRealtimePOS(
     loading,
     wsStatus,
     lastSyncAt,
+    lastRemoteEvent,
     refresh: fetchAll,
   };
 }

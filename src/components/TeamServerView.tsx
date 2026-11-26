@@ -91,17 +91,10 @@ export function TeamServerView({
   onRefresh,
 }: TeamServerViewProps) {
   const browserOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-  const allUrls = Array.from(
-    new Set(
-      [
-        ...(serverInfo?.lanUrls ?? []),
-        ...(serverInfo?.publicAppUrl ? [serverInfo.publicAppUrl] : []),
-        ...(browserOrigin ? [browserOrigin] : []),
-      ].filter(Boolean)
-    )
-  );
+  const appUrl = browserOrigin || serverInfo?.publicAppUrl || '';
+  const allUrls = appUrl ? [appUrl] : [];
 
-  const [selectedUrl, setSelectedUrl] = useState<string>(allUrls[0] || browserOrigin);
+  const [selectedUrl, setSelectedUrl] = useState<string>(appUrl);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copiedUrl, setCopiedUrl] = useState<string>('');
   const [saveLabel, setSaveLabel] = useState('');
@@ -134,10 +127,10 @@ export function TeamServerView({
   }, [serverInfo]);
 
   useEffect(() => {
-    if (!selectedUrl && allUrls.length > 0) {
-      setSelectedUrl(allUrls[0]);
+    if (appUrl && selectedUrl !== appUrl) {
+      setSelectedUrl(appUrl);
     }
-  }, [allUrls, selectedUrl]);
+  }, [appUrl, selectedUrl]);
 
   useEffect(() => {
     const target = selectedUrl || browserOrigin;
@@ -341,10 +334,10 @@ export function TeamServerView({
               <Server className="h-4 w-4 text-amber-600" />
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  Team Server & Sharing Hub
+                  Single Application Server &amp; Sharing Hub
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Share any address below so teammates on phones, tablets, or laptops can edit together in real time.
+                  1 central server — every online device uses this Application URL to edit, auto-save, and sync live together.
                 </p>
               </div>
             </div>
@@ -362,103 +355,70 @@ export function TeamServerView({
             <div className="md:col-span-8 space-y-3">
               <div>
                 <div className="text-xs font-semibold text-slate-700 mb-1.5">
-                  Available Server Addresses
+                  Application Server URL (All Online Devices)
                 </div>
                 <div className="space-y-2">
-                  {allUrls.map((url) => {
-                    const isLan = /^http:\/\/(192\.168\.|10\.|172\.)/.test(url);
-                    const isBonjour = /\.local:\d+/i.test(url);
-                    const isSelected = selectedUrl === url;
-                    return (
-                      <div
-                        key={url}
-                        onClick={() => setSelectedUrl(url)}
-                        className={`flex items-center justify-between gap-2 border p-2.5 text-xs cursor-pointer transition-colors ${
-                          isSelected ? 'border-amber-600 bg-amber-50/40' : 'border-slate-200 hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="font-mono font-semibold text-slate-900 truncate">{url}</div>
-                          <div className="text-[11px] text-slate-500">
-                            {isBonjour
-                              ? 'Apple Bonjour / Local Mac & iPhone URL (.local)'
-                              : isLan
-                                ? 'Local Wi-Fi / LAN Device Server (same network)'
-                                : 'Current Browser / Shared App URL'}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {canNativeShare && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleNativeShare('KR-ONCUE Team Server', 'Open KR-ONCUE POS Server', url);
-                              }}
-                              className="inline-flex items-center gap-1 border border-slate-300 bg-white px-2 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
-                              title="Share via AirDrop / Messages"
-                            >
-                              <Share2 className="h-3 w-3" />
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              copyToClipboard(url);
-                            }}
-                            className="inline-flex items-center gap-1 border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
-                          >
-                            {copiedUrl === url ? (
-                              <>
-                                <Check className="h-3 w-3 text-emerald-600" />
-                                Copied
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="h-3 w-3" />
-                                Copy
-                              </>
-                            )}
-                          </button>
+                  {allUrls.map((url) => (
+                    <div
+                      key={url}
+                      className="flex items-center justify-between gap-2 border border-amber-600 bg-amber-50/40 p-2.5 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-mono font-semibold text-slate-900 truncate">{url}</div>
+                        <div className="text-[11px] text-slate-500">
+                          Single Central Server · Live Sync &amp; Auto-Save Enabled
                         </div>
                       </div>
-                    );
-                  })}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {canNativeShare && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleNativeShare('KR-ONCUE Team Server', 'Open KR-ONCUE POS Server', url)
+                            }
+                            className="inline-flex items-center gap-1 border border-slate-300 bg-white px-2 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                            title="Share Application URL"
+                          >
+                            <Share2 className="h-3 w-3" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(url)}
+                          className="inline-flex items-center gap-1 border border-slate-300 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                        >
+                          {copiedUrl === url ? (
+                            <>
+                              <Check className="h-3 w-3 text-emerald-600" />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-3 w-3" />
+                              Copy URL
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              {serverInfo?.runtime === 'netlify' ? (
-                <div className="bg-emerald-50 border border-emerald-200 p-3 text-xs space-y-1.5">
-                  <div className="font-semibold text-emerald-950">Netlify Cloud Serverless Hosting Active:</div>
-                  <ol className="list-decimal list-inside space-y-1 text-emerald-900">
-                    <li>
-                      Your POS database is persisted via <strong>Netlify Blobs</strong> and served over HTTPS from <code className="bg-white border border-emerald-200 px-1 py-0.5 font-mono text-[11px]">{browserOrigin}</code>.
-                    </li>
-                    <li>
-                      Share the URL or QR code with any teammate anywhere — edits sync automatically across devices every few seconds.
-                    </li>
-                    <li>
-                      Use <strong>Install App</strong> (or Safari &ldquo;Add to Home Screen&rdquo;) to install this POS directly onto phones, tablets, or desktops.
-                    </li>
-                  </ol>
-                </div>
-              ) : (
-                <div className="bg-slate-50 border border-slate-200 p-3 text-xs space-y-1.5">
-                  <div className="font-semibold text-slate-800">How to Host This Device as a Local Team Server:</div>
-                  <ol className="list-decimal list-inside space-y-1 text-slate-600">
-                    <li>
-                      Connect this host computer and your team devices to the same Wi-Fi or router.
-                    </li>
-                    <li>
-                      Run <code className="bg-white border border-slate-200 px-1 py-0.5 font-mono text-[11px]">npm run dev</code> (or <code className="bg-white border border-slate-200 px-1 py-0.5 font-mono text-[11px]">npm run build && npx tsx server.ts</code>) on this device. It listens on <code className="font-mono text-[11px]">0.0.0.0:3000</code>.
-                    </li>
-                    <li>
-                      Have teammates open the LAN IP URL (or scan the QR code) in their browser — every edit saves directly to this device&apos;s SQLite database and syncs live.
-                    </li>
-                  </ol>
-                </div>
-              )}
+              <div className="bg-emerald-50 border border-emerald-200 p-3 text-xs space-y-1.5">
+                <div className="font-semibold text-emerald-950">1 Shared Server · Live Multi-Device Collaboration:</div>
+                <ol className="list-decimal list-inside space-y-1 text-emerald-900">
+                  <li>
+                    All phones, tablets, and computers open this single Application URL (<code className="bg-white border border-emerald-200 px-1 py-0.5 font-mono text-[11px]">{appUrl}</code>).
+                  </li>
+                  <li>
+                    Any active device online can make changes — edits <strong>auto-save directly to server files</strong> and appear instantly across all connected devices.
+                  </li>
+                  <li>
+                    Use <strong>Install App</strong> (or Safari &ldquo;Add to Home Screen&rdquo;) to run this single shared POS directly on mobile or desktop.
+                  </li>
+                </ol>
+              </div>
             </div>
 
             <div className="md:col-span-4 flex flex-col items-center justify-center border border-slate-200 bg-slate-50 p-3 text-center">
@@ -469,7 +429,7 @@ export function TeamServerView({
                   Generating QR...
                 </div>
               )}
-              <div className="mt-2 text-[11px] font-medium text-slate-700">Scan on Phone / Tablet</div>
+              <div className="mt-2 text-[11px] font-medium text-slate-700">Scan Application URL</div>
               <div className="mt-0.5 font-mono text-[10px] text-slate-500 max-w-full truncate">
                 {selectedUrl}
               </div>
@@ -1132,8 +1092,16 @@ export function TeamServerView({
           </div>
 
           {serverInfo && (
-            <div className="text-[11px] font-mono text-slate-500 truncate">
-              Storage Path: {serverInfo.dbPath} · DB Modified: {new Date(serverInfo.lastSavedAt).toLocaleString()}
+            <div className="text-[11px] font-mono text-slate-500 space-y-0.5">
+              <div className="truncate">
+                Storage Path: {serverInfo.dbPath} · DB Modified: {new Date(serverInfo.lastSavedAt).toLocaleString()}
+              </div>
+              {serverInfo.autoSavePath && (
+                <div className="truncate text-emerald-700">
+                  Auto-Save File: {serverInfo.autoSavePath} · Updated:{' '}
+                  {new Date(serverInfo.lastAutoSaveAt || serverInfo.lastSavedAt).toLocaleString()}
+                </div>
+              )}
             </div>
           )}
         </div>

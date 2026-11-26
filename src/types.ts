@@ -327,6 +327,8 @@ export interface RealtimeMessage {
   type: RealtimeEventType;
   timestamp: string;
   detail?: string;
+  actor?: string;
+  revision?: number;
   members?: PresenceMember[];
 }
 
@@ -402,9 +404,12 @@ export interface ServerInfo {
   dbPath: string;
   dbSizeBytes: number;
   lastSavedAt: string;
+  lastAutoSaveAt?: string;
+  autoSavePath?: string;
   lastManualSaveAt: string;
   lastManualSaveBy: string;
   teamPinEnabled: boolean;
+  revision?: number;
   counts: {
     inventory: number;
     clients: number;
@@ -420,4 +425,17 @@ export interface ServerInfo {
   };
   onlineMembers: PresenceMember[];
 }
+
+export interface SyncStateResponse {
+  revision: number;
+  lastEvent: {
+    type: RealtimeEventType;
+    actor: string;
+    detail?: string;
+    timestamp: string;
+  } | null;
+  onlineMembers: PresenceMember[];
+  serverUsers: ServerUser[];
+}
+
 

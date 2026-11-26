@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, Pencil, Plus, Printer, Trash2, X } from 'lucide-react';
 import type {
   BudgetItem,
@@ -112,6 +112,17 @@ export function SlipsAndFinanceView({
   const [editBudItems, setEditBudItems] = useState<BudgetItem[]>([]);
 
   const [submitting, setSubmitting] = useState(false);
+  const [payAutoSave, setPayAutoSave] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [paySavedAt, setPaySavedAt] = useState('');
+  const paySnapshotRef = useRef('');
+
+  const [maintAutoSave, setMaintAutoSave] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [maintSavedAt, setMaintSavedAt] = useState('');
+  const maintSnapshotRef = useRef('');
+
+  const [budAutoSave, setBudAutoSave] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [budSavedAt, setBudSavedAt] = useState('');
+  const budSnapshotRef = useRef('');
 
   const openEditPayment = (p: Payment) => {
     setEditingPayment(p);
@@ -120,39 +131,85 @@ export function SlipsAndFinanceView({
     setPayRecvByEdit(p.receivedBy);
     setPayAuthByEdit(p.authorizedBy);
     setPayNotesEdit(p.notes);
+    paySnapshotRef.current = JSON.stringify({
+      paymentMethod: p.paymentMethod,
+      referenceNo: p.referenceNo,
+      receivedBy: p.receivedBy,
+      authorizedBy: p.authorizedBy,
+      notes: p.notes,
+    });
+    setPayAutoSave('idle');
+    setPaySavedAt('');
     onEditingChange(`payment:${p.receiptNo}`);
   };
 
   const closeEditPayment = () => {
     setEditingPayment(null);
+    setPayAutoSave('idle');
+    setPaySavedAt('');
     onEditingChange(null);
   };
 
-  const handleSavePayment = async () => {
+  const persistPaymentEdit = useCallback(
+    async (closeAfter: boolean) => {
+      if (!editingPayment) return;
+      const payload = {
+        paymentMethod: payMethodEdit,
+        referenceNo: payRefEdit,
+        receivedBy: payRecvByEdit,
+        authorizedBy: payAuthByEdit,
+        notes: payNotesEdit,
+      };
+      const serialized = JSON.stringify(payload);
+      if (serialized === paySnapshotRef.current) {
+        if (closeAfter) closeEditPayment();
+        return;
+      }
+      if (closeAfter) setSubmitting(true);
+      setPayAutoSave('saving');
+      try {
+        const res = await apiFetch(`/api/payments/${editingPayment.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update payment receipt');
+        paySnapshotRef.current = serialized;
+        setPayAutoSave('saved');
+        setPaySavedAt(new Date().toLocaleTimeString());
+        onRefresh();
+        if (closeAfter) {
+          onNotify(`Updated receipt ${editingPayment.receiptNo}.`);
+          closeEditPayment();
+        }
+      } catch (err) {
+        setPayAutoSave('error');
+        if (closeAfter) onNotify((err as Error).message, 'error');
+      } finally {
+        if (closeAfter) setSubmitting(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [editingPayment, payMethodEdit, payRefEdit, payRecvByEdit, payAuthByEdit, payNotesEdit]
+  );
+
+  useEffect(() => {
     if (!editingPayment) return;
-    setSubmitting(true);
-    try {
-      const res = await apiFetch(`/api/payments/${editingPayment.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          paymentMethod: payMethodEdit,
-          referenceNo: payRefEdit,
-          receivedBy: payRecvByEdit,
-          authorizedBy: payAuthByEdit,
-          notes: payNotesEdit,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to update payment receipt');
-      onNotify(`Updated receipt ${editingPayment.receiptNo}.`);
-      closeEditPayment();
-      onRefresh();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+    const current = JSON.stringify({
+      paymentMethod: payMethodEdit,
+      referenceNo: payRefEdit,
+      receivedBy: payRecvByEdit,
+      authorizedBy: payAuthByEdit,
+      notes: payNotesEdit,
+    });
+    if (current === paySnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistPaymentEdit(false);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [editingPayment, payMethodEdit, payRefEdit, payRecvByEdit, payAuthByEdit, payNotesEdit, persistPaymentEdit]);
+
+  const handleSavePayment = () => persistPaymentEdit(true);
 
   const handleCreateMaint = async () => {
     if (!maintCode || !maintProblem.trim()) {
@@ -196,46 +253,124 @@ export function SlipsAndFinanceView({
     setEditMaintWork(m.workPerformed);
     setEditMaintLabor(m.laborCost);
     setEditMaintOther(m.otherCost);
+    maintSnapshotRef.current = JSON.stringify({
+      status: m.status,
+      priorityLevel: m.priorityLevel,
+      reportedProblem: m.reportedProblem.trim(),
+      proposedRepair: m.proposedRepair,
+      estimatedPartsCost: m.estimatedPartsCost,
+      technician: m.technician,
+      workPerformed: m.workPerformed,
+      laborCost: m.laborCost,
+      otherCost: m.otherCost,
+    });
+    setMaintAutoSave('idle');
+    setMaintSavedAt('');
     onEditingChange(`maint:${m.slipNo}`);
   };
 
   const closeEditMaint = () => {
     setEditingMaint(null);
+    setMaintAutoSave('idle');
+    setMaintSavedAt('');
     onEditingChange(null);
   };
 
-  const handleSaveEditMaint = async () => {
-    if (!editingMaint || !editMaintProblem.trim()) {
-      onNotify('Reported problem is required.', 'error');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const res = await apiFetch(`/api/maintenance/${editingMaint.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          status: editMaintStatus,
-          priorityLevel: editMaintPriority,
-          reportedProblem: editMaintProblem.trim(),
-          proposedRepair: editMaintProposed,
-          estimatedPartsCost: editMaintPartsCost,
-          technician: editMaintTech,
-          workPerformed: editMaintWork,
-          laborCost: editMaintLabor,
-          otherCost: editMaintOther,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to update maintenance slip');
-      onNotify(`Saved maintenance slip ${editingMaint.slipNo}.`);
-      closeEditMaint();
-      onRefresh();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const persistMaintEdit = useCallback(
+    async (closeAfter: boolean) => {
+      if (!editingMaint) return;
+      if (!editMaintProblem.trim()) {
+        if (closeAfter) onNotify('Reported problem is required.', 'error');
+        return;
+      }
+      const payload = {
+        status: editMaintStatus,
+        priorityLevel: editMaintPriority,
+        reportedProblem: editMaintProblem.trim(),
+        proposedRepair: editMaintProposed,
+        estimatedPartsCost: editMaintPartsCost,
+        technician: editMaintTech,
+        workPerformed: editMaintWork,
+        laborCost: editMaintLabor,
+        otherCost: editMaintOther,
+      };
+      const serialized = JSON.stringify(payload);
+      if (serialized === maintSnapshotRef.current) {
+        if (closeAfter) closeEditMaint();
+        return;
+      }
+      if (closeAfter) setSubmitting(true);
+      setMaintAutoSave('saving');
+      try {
+        const res = await apiFetch(`/api/maintenance/${editingMaint.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update maintenance slip');
+        maintSnapshotRef.current = serialized;
+        setMaintAutoSave('saved');
+        setMaintSavedAt(new Date().toLocaleTimeString());
+        onRefresh();
+        if (closeAfter) {
+          onNotify(`Saved maintenance slip ${editingMaint.slipNo}.`);
+          closeEditMaint();
+        }
+      } catch (err) {
+        setMaintAutoSave('error');
+        if (closeAfter) onNotify((err as Error).message, 'error');
+      } finally {
+        if (closeAfter) setSubmitting(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      editingMaint,
+      editMaintStatus,
+      editMaintPriority,
+      editMaintProblem,
+      editMaintProposed,
+      editMaintPartsCost,
+      editMaintTech,
+      editMaintWork,
+      editMaintLabor,
+      editMaintOther,
+    ]
+  );
+
+  useEffect(() => {
+    if (!editingMaint || !editMaintProblem.trim()) return;
+    const current = JSON.stringify({
+      status: editMaintStatus,
+      priorityLevel: editMaintPriority,
+      reportedProblem: editMaintProblem.trim(),
+      proposedRepair: editMaintProposed,
+      estimatedPartsCost: editMaintPartsCost,
+      technician: editMaintTech,
+      workPerformed: editMaintWork,
+      laborCost: editMaintLabor,
+      otherCost: editMaintOther,
+    });
+    if (current === maintSnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistMaintEdit(false);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingMaint,
+    editMaintStatus,
+    editMaintPriority,
+    editMaintProblem,
+    editMaintProposed,
+    editMaintPartsCost,
+    editMaintTech,
+    editMaintWork,
+    editMaintLabor,
+    editMaintOther,
+    persistMaintEdit,
+  ]);
+
+  const handleSaveEditMaint = () => persistMaintEdit(true);
 
   const handleCompleteMaint = async () => {
     if (!completingSlip) return;
@@ -320,6 +455,7 @@ export function SlipsAndFinanceView({
   };
 
   const openEditBudget = (b: BudgetRequest) => {
+    const clonedItems = b.items.map((it) => ({ ...it }));
     setEditingBudget(b);
     setEditBudReqBy(b.requestedBy);
     setEditBudDept(b.department);
@@ -329,47 +465,125 @@ export function SlipsAndFinanceView({
     setEditBudPayee(b.payeeSupplier);
     setEditBudStatus(b.status);
     setEditBudActual(b.actualSpent);
-    setEditBudItems(b.items.map((it) => ({ ...it })));
+    setEditBudItems(clonedItems);
+    budSnapshotRef.current = JSON.stringify({
+      requestedBy: b.requestedBy.trim(),
+      department: b.department,
+      eventName: b.eventName,
+      venue: b.venue,
+      purpose: b.purpose.trim(),
+      payeeSupplier: b.payeeSupplier,
+      status: b.status,
+      actualSpent: b.actualSpent,
+      items: clonedItems,
+    });
+    setBudAutoSave('idle');
+    setBudSavedAt('');
     onEditingChange(`budget:${b.budgetNo}`);
   };
 
   const closeEditBudget = () => {
     setEditingBudget(null);
+    setBudAutoSave('idle');
+    setBudSavedAt('');
     onEditingChange(null);
   };
 
-  const handleSaveEditBudget = async () => {
-    if (!editingBudget || !editBudReqBy.trim() || !editBudPurpose.trim()) {
-      onNotify('Requester and purpose are required.', 'error');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const res = await apiFetch(`/api/budgets/${editingBudget.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          requestedBy: editBudReqBy.trim(),
-          department: editBudDept,
-          eventName: editBudEvent,
-          venue: editBudVenue,
-          purpose: editBudPurpose.trim(),
-          payeeSupplier: editBudPayee,
-          status: editBudStatus,
-          actualSpent: editBudActual,
-          items: editBudItems,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to update budget request');
-      onNotify(`Saved budget request ${editingBudget.budgetNo}.`);
-      closeEditBudget();
-      onRefresh();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const persistBudgetEdit = useCallback(
+    async (closeAfter: boolean) => {
+      if (!editingBudget) return;
+      if (!editBudReqBy.trim() || !editBudPurpose.trim()) {
+        if (closeAfter) onNotify('Requester and purpose are required.', 'error');
+        return;
+      }
+      const payload = {
+        requestedBy: editBudReqBy.trim(),
+        department: editBudDept,
+        eventName: editBudEvent,
+        venue: editBudVenue,
+        purpose: editBudPurpose.trim(),
+        payeeSupplier: editBudPayee,
+        status: editBudStatus,
+        actualSpent: editBudActual,
+        items: editBudItems,
+      };
+      const serialized = JSON.stringify(payload);
+      if (serialized === budSnapshotRef.current) {
+        if (closeAfter) closeEditBudget();
+        return;
+      }
+      if (closeAfter) setSubmitting(true);
+      setBudAutoSave('saving');
+      try {
+        const res = await apiFetch(`/api/budgets/${editingBudget.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update budget request');
+        budSnapshotRef.current = serialized;
+        setBudAutoSave('saved');
+        setBudSavedAt(new Date().toLocaleTimeString());
+        onRefresh();
+        if (closeAfter) {
+          onNotify(`Saved budget request ${editingBudget.budgetNo}.`);
+          closeEditBudget();
+        }
+      } catch (err) {
+        setBudAutoSave('error');
+        if (closeAfter) onNotify((err as Error).message, 'error');
+      } finally {
+        if (closeAfter) setSubmitting(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      editingBudget,
+      editBudReqBy,
+      editBudDept,
+      editBudEvent,
+      editBudVenue,
+      editBudPurpose,
+      editBudPayee,
+      editBudStatus,
+      editBudActual,
+      editBudItems,
+    ]
+  );
+
+  useEffect(() => {
+    if (!editingBudget || !editBudReqBy.trim() || !editBudPurpose.trim()) return;
+    const current = JSON.stringify({
+      requestedBy: editBudReqBy.trim(),
+      department: editBudDept,
+      eventName: editBudEvent,
+      venue: editBudVenue,
+      purpose: editBudPurpose.trim(),
+      payeeSupplier: editBudPayee,
+      status: editBudStatus,
+      actualSpent: editBudActual,
+      items: editBudItems,
+    });
+    if (current === budSnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistBudgetEdit(false);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingBudget,
+    editBudReqBy,
+    editBudDept,
+    editBudEvent,
+    editBudVenue,
+    editBudPurpose,
+    editBudPayee,
+    editBudStatus,
+    editBudActual,
+    editBudItems,
+    persistBudgetEdit,
+  ]);
+
+  const handleSaveEditBudget = () => persistBudgetEdit(true);
 
   const handleDeleteBudget = async (b: BudgetRequest) => {
     setSubmitting(true);
@@ -724,9 +938,21 @@ export function SlipsAndFinanceView({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
           <div className="w-full max-w-md bg-white border border-slate-200 shadow-lg">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-900">
-                Edit Receipt {editingPayment.receiptNo} (FORM 0007)
-              </h3>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Edit Receipt {editingPayment.receiptNo} (FORM 0007)
+                </h3>
+                {payAutoSave === 'saving' && (
+                  <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                    Auto-saving...
+                  </span>
+                )}
+                {payAutoSave === 'saved' && (
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                    Auto-saved {paySavedAt}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={closeEditPayment}
@@ -796,7 +1022,7 @@ export function SlipsAndFinanceView({
                 onClick={closeEditPayment}
                 className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
               >
-                Cancel
+                Close
               </button>
               <button
                 type="button"
@@ -804,7 +1030,7 @@ export function SlipsAndFinanceView({
                 onClick={handleSavePayment}
                 className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
               >
-                Save Receipt
+                Save &amp; Close
               </button>
             </div>
           </div>
@@ -910,9 +1136,21 @@ export function SlipsAndFinanceView({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 overflow-y-auto">
           <div className="w-full max-w-lg bg-white border border-slate-200 shadow-lg my-6">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-900">
-                Edit Maintenance Slip {editingMaint.slipNo} ({editingMaint.inventoryCode})
-              </h3>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Edit Maintenance Slip {editingMaint.slipNo} ({editingMaint.inventoryCode})
+                </h3>
+                {maintAutoSave === 'saving' && (
+                  <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                    Auto-saving...
+                  </span>
+                )}
+                {maintAutoSave === 'saved' && (
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                    Auto-saved {maintSavedAt}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={closeEditMaint}
@@ -1026,7 +1264,7 @@ export function SlipsAndFinanceView({
                 onClick={closeEditMaint}
                 className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
               >
-                Cancel
+                Close
               </button>
               <button
                 type="button"
@@ -1034,7 +1272,7 @@ export function SlipsAndFinanceView({
                 onClick={handleSaveEditMaint}
                 className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
               >
-                Save Maintenance Slip
+                Save &amp; Close
               </button>
             </div>
           </div>
@@ -1228,9 +1466,21 @@ export function SlipsAndFinanceView({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 overflow-y-auto">
           <div className="w-full max-w-2xl bg-white border border-slate-200 shadow-xl my-6">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-semibold text-slate-900">
-                Edit Budget Request {editingBudget.budgetNo} (FORM 0003)
-              </h3>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-semibold text-slate-900">
+                  Edit Budget Request {editingBudget.budgetNo} (FORM 0003)
+                </h3>
+                {budAutoSave === 'saving' && (
+                  <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                    Auto-saving...
+                  </span>
+                )}
+                {budAutoSave === 'saved' && (
+                  <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                    Auto-saved {budSavedAt}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={closeEditBudget}
@@ -1415,7 +1665,7 @@ export function SlipsAndFinanceView({
                   onClick={closeEditBudget}
                   className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 cursor-pointer"
                 >
-                  Cancel
+                  Close
                 </button>
                 <button
                   type="button"
@@ -1423,7 +1673,7 @@ export function SlipsAndFinanceView({
                   onClick={handleSaveEditBudget}
                   className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
                 >
-                  Save Budget Request
+                  Save &amp; Close
                 </button>
               </div>
             </div>

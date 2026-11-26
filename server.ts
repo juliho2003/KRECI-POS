@@ -83,7 +83,7 @@ async function startServer() {
     realtimeMode: 'ws',
     port: PORT,
     serverStartTime: SERVER_START_TIME,
-    getLanUrls,
+    getLanUrls: () => [],
     getOnlineMembers,
     broadcast,
     broadcastPresence,

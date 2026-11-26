@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Image as ImageIcon, Pencil, Plus, Printer, Search, Trash2, Upload, Wrench, X } from 'lucide-react';
 import type {
   BusinessUnit,
@@ -174,6 +174,9 @@ export function InventoryView({
   const [maintPriority, setMaintPriority] = useState<'Low' | 'Normal' | 'Urgent' | 'Critical'>('Urgent');
   const [maintRequester, setMaintRequester] = useState('');
   const [saving, setSaving] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [lastSavedTime, setLastSavedTime] = useState('');
+  const editSnapshotRef = useRef('');
 
   const businessMap = useMemo(() => {
     const map = new Map<string, BusinessUnit>();
@@ -224,11 +227,33 @@ export function InventoryView({
     });
   }, [inventory, search, businessFilter, categoryFilter, statusFilter]);
 
+  const buildEditSnapshot = useCallback(
+    (payload: {
+      businessId: string;
+      categoryCode: EquipmentCategoryCode;
+      categoryName: string;
+      name: string;
+      brand: string;
+      rentalRate: number;
+      qtyOnHand: number;
+      condition: string;
+      status: InventoryStatus;
+      placement: string;
+      location: string;
+      remarks: string;
+      imageUrl: string;
+    }) => JSON.stringify(payload),
+    []
+  );
+
   const openEdit = (item: InventoryItem) => {
+    const bizId = item.businessId || 'kr-oncue';
+    const catName = item.categoryName || CATEGORY_NAMES[item.categoryCode];
+    const imgUrl = item.imageUrl || '';
     setEditingItem(item);
-    setEditBusinessId(item.businessId || 'kr-oncue');
+    setEditBusinessId(bizId);
     setEditCategory(item.categoryCode);
-    setEditCategoryName(item.categoryName || CATEGORY_NAMES[item.categoryCode]);
+    setEditCategoryName(catName);
     setEditName(item.name);
     setEditBrand(item.brand);
     setEditRate(item.rentalRate);
@@ -238,13 +263,32 @@ export function InventoryView({
     setEditPlacement(item.placement);
     setEditLocation(item.location);
     setEditRemarks(item.remarks);
-    setEditImageUrl(item.imageUrl || '');
+    setEditImageUrl(imgUrl);
+    editSnapshotRef.current = buildEditSnapshot({
+      businessId: bizId,
+      categoryCode: item.categoryCode,
+      categoryName: catName,
+      name: item.name.trim(),
+      brand: item.brand.trim(),
+      rentalRate: item.rentalRate,
+      qtyOnHand: item.qtyOnHand,
+      condition: item.condition,
+      status: item.status,
+      placement: item.placement,
+      location: item.location,
+      remarks: item.remarks,
+      imageUrl: imgUrl.trim(),
+    });
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     setConfirmDelete(false);
     onEditingChange(`inventory:${item.code}`);
   };
 
   const closeEdit = () => {
     setEditingItem(null);
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     setConfirmDelete(false);
     onEditingChange(null);
   };
@@ -265,43 +309,119 @@ export function InventoryView({
     }
   };
 
-  const handleSaveEdit = async () => {
-    if (!editingItem) return;
-    if (!editName.trim()) {
-      onNotify('Equipment name is required.', 'error');
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await apiFetch(`/api/inventory/${encodeURIComponent(editingItem.code)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          businessId: editBusinessId,
-          categoryCode: editCategory,
-          categoryName: editCategoryName.trim() || CATEGORY_NAMES[editCategory],
-          name: editName.trim(),
-          brand: editBrand.trim(),
-          rentalRate: editRate,
-          qtyOnHand: editQty,
-          condition: editCondition,
-          status: editStatus,
-          placement: editPlacement,
-          location: editLocation,
-          remarks: editRemarks,
-          imageUrl: editImageUrl.trim(),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Update failed');
-      onNotify(`Saved changes to ${editingItem.code}.`);
-      closeEdit();
-      onRefresh();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
+  const persistEdit = useCallback(
+    async (closeAfter: boolean) => {
+      if (!editingItem) return;
+      if (!editName.trim()) {
+        if (closeAfter) onNotify('Equipment name is required.', 'error');
+        return;
+      }
+      const payload = {
+        businessId: editBusinessId,
+        categoryCode: editCategory,
+        categoryName: editCategoryName.trim() || CATEGORY_NAMES[editCategory],
+        name: editName.trim(),
+        brand: editBrand.trim(),
+        rentalRate: editRate,
+        qtyOnHand: editQty,
+        condition: editCondition,
+        status: editStatus,
+        placement: editPlacement,
+        location: editLocation,
+        remarks: editRemarks,
+        imageUrl: editImageUrl.trim(),
+      };
+      const serialized = buildEditSnapshot(payload);
+      if (serialized === editSnapshotRef.current) {
+        if (closeAfter) closeEdit();
+        return;
+      }
+      if (closeAfter) setSaving(true);
+      setAutoSaveStatus('saving');
+      try {
+        const res = await apiFetch(`/api/inventory/${encodeURIComponent(editingItem.code)}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Update failed');
+        editSnapshotRef.current = serialized;
+        setAutoSaveStatus('saved');
+        setLastSavedTime(new Date().toLocaleTimeString());
+        onRefresh();
+        if (closeAfter) {
+          onNotify(`Saved changes to ${editingItem.code}.`);
+          closeEdit();
+        }
+      } catch (err) {
+        setAutoSaveStatus('error');
+        if (closeAfter) onNotify((err as Error).message, 'error');
+      } finally {
+        if (closeAfter) setSaving(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      editingItem,
+      editBusinessId,
+      editCategory,
+      editCategoryName,
+      editName,
+      editBrand,
+      editRate,
+      editQty,
+      editCondition,
+      editStatus,
+      editPlacement,
+      editLocation,
+      editRemarks,
+      editImageUrl,
+      buildEditSnapshot,
+    ]
+  );
+
+  useEffect(() => {
+    if (!editingItem || !editName.trim()) return;
+    const currentSnapshot = buildEditSnapshot({
+      businessId: editBusinessId,
+      categoryCode: editCategory,
+      categoryName: editCategoryName.trim() || CATEGORY_NAMES[editCategory],
+      name: editName.trim(),
+      brand: editBrand.trim(),
+      rentalRate: editRate,
+      qtyOnHand: editQty,
+      condition: editCondition,
+      status: editStatus,
+      placement: editPlacement,
+      location: editLocation,
+      remarks: editRemarks,
+      imageUrl: editImageUrl.trim(),
+    });
+    if (currentSnapshot === editSnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistEdit(false);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingItem,
+    editBusinessId,
+    editCategory,
+    editCategoryName,
+    editName,
+    editBrand,
+    editRate,
+    editQty,
+    editCondition,
+    editStatus,
+    editPlacement,
+    editLocation,
+    editRemarks,
+    editImageUrl,
+    buildEditSnapshot,
+    persistEdit,
+  ]);
+
+  const handleSaveEdit = () => persistEdit(true);
 
   const handleDeleteItem = async () => {
     if (!editingItem) return;
@@ -685,8 +805,25 @@ export function InventoryView({
           <div className="w-full max-w-xl bg-white border border-slate-200 shadow-lg my-4">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
               <div>
-                <h3 className="text-sm font-semibold text-slate-900">Edit Equipment — {editingItem.code}</h3>
-                <p className="text-xs text-slate-500 truncate">Changes & equipment photo save to the team server</p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-sm font-semibold text-slate-900">Edit Equipment — {editingItem.code}</h3>
+                  {autoSaveStatus === 'saving' && (
+                    <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                      Auto-saving...
+                    </span>
+                  )}
+                  {autoSaveStatus === 'saved' && (
+                    <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                      Auto-saved {lastSavedTime}
+                    </span>
+                  )}
+                  {autoSaveStatus === 'error' && (
+                    <span className="text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 px-1.5 py-0.5">
+                      Auto-save retrying
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 truncate">Edits auto-save to the server &amp; sync across all online devices</p>
               </div>
               <button
                 type="button"
@@ -920,7 +1057,7 @@ export function InventoryView({
                   onClick={closeEdit}
                   className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  Close
                 </button>
                 <button
                   type="button"
@@ -928,7 +1065,7 @@ export function InventoryView({
                   onClick={handleSaveEdit}
                   className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
                 >
-                  Save Changes
+                  Save &amp; Close
                 </button>
               </div>
             </div>

@@ -105,6 +105,7 @@ export default function App() {
     onlineMembers,
     loading,
     wsStatus,
+    lastRemoteEvent,
     refresh,
   } = useRealtimePOS(operator, activeView, editingKey);
 
@@ -114,6 +115,7 @@ export default function App() {
 
   const lastSyncedUserRef = useRef<string>('');
   const promptedJoinRef = useRef<boolean>(false);
+  const lastRemoteToastRef = useRef<string>('');
 
   const notify = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type });
@@ -121,6 +123,14 @@ export default function App() {
       setToast((curr) => (curr?.msg === msg ? null : curr));
     }, 4500);
   };
+
+  useEffect(() => {
+    if (!lastRemoteEvent) return;
+    const key = `${lastRemoteEvent.timestamp}|${lastRemoteEvent.actor}|${lastRemoteEvent.summary}`;
+    if (lastRemoteToastRef.current === key) return;
+    lastRemoteToastRef.current = key;
+    notify(`${lastRemoteEvent.actor} · ${lastRemoteEvent.summary}`);
+  }, [lastRemoteEvent]);
 
   // Prompt operator once on load if they haven't added or selected a team member account yet
   useEffect(() => {
@@ -720,35 +730,24 @@ export default function App() {
           </div>
         </header>
 
-        {/* Live Access Restriction Banner (Revoked / View-Only) */}
-        {currentServerUser &&
-          (currentServerUser.status === 'REVOKED' ||
-            !currentServerUser.canEdit ||
-            currentServerUser.accessLevel === 'VIEWER') && (
-            <div
-              className={`no-print border-b px-4 sm:px-6 py-2 text-xs flex items-center justify-between gap-3 ${
-                currentServerUser.status === 'REVOKED'
-                  ? 'bg-red-50 border-red-200 text-red-900'
-                  : 'bg-amber-50 border-amber-200 text-amber-900'
-              }`}
-            >
-              <div className="flex items-center gap-2 font-medium">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span>
-                  {currentServerUser.status === 'REVOKED'
-                    ? `Access Revoked for ${currentServerUser.name} — You can view cached data, but server edits are disabled by the owner.`
-                    : `View-Only Access (${currentServerUser.name}) — You receive real-time updates, but editing/saving requires EDITOR permission.`}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveView('team')}
-                className="underline font-semibold shrink-0 cursor-pointer"
-              >
-                View Server Users
-              </button>
+        {/* Live Access Restriction Banner (Revoked Only) */}
+        {currentServerUser && currentServerUser.status === 'REVOKED' && (
+          <div className="no-print border-b px-4 sm:px-6 py-2 text-xs flex items-center justify-between gap-3 bg-red-50 border-red-200 text-red-900">
+            <div className="flex items-center gap-2 font-medium">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>
+                Access Revoked for {currentServerUser.name} — You can view cached data, but server edits are disabled by the owner.
+              </span>
             </div>
-          )}
+            <button
+              type="button"
+              onClick={() => setActiveView('team')}
+              className="underline font-semibold shrink-0 cursor-pointer"
+            >
+              View Server Users
+            </button>
+          </div>
+        )}
 
         {/* Live Operational KPI Strip */}
         <div className="no-print border-b border-slate-200 bg-white px-4 sm:px-6 py-3">
@@ -804,6 +803,54 @@ export default function App() {
           )}
         </div>
 
+        {/* Live Multi-Device Editing & Auto-Save Strip */}
+        <div className="no-print border-b border-slate-200 bg-slate-50 px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-2 flex-wrap min-w-0">
+            <span className="inline-flex items-center gap-1.5 font-semibold text-slate-700 shrink-0">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+              Single Server Live:
+            </span>
+            {onlineMembers.length === 0 ? (
+              <span className="text-slate-500">Waiting for active team operator...</span>
+            ) : (
+              onlineMembers.map((m) => (
+                <span
+                  key={`${m.serverUserId ?? m.clientId}-${m.deviceId ?? ''}`}
+                  className={`inline-flex items-center gap-1.5 border px-2 py-0.5 ${
+                    m.editingKey
+                      ? 'border-amber-300 bg-amber-50 text-amber-900'
+                      : 'border-slate-200 bg-white text-slate-700'
+                  }`}
+                >
+                  <span
+                    className="h-2 w-2 rounded-full shrink-0"
+                    style={{ backgroundColor: m.color }}
+                  />
+                  <span className="font-semibold">{m.name}</span>
+                  {m.deviceName && (
+                    <span className="hidden md:inline text-slate-400">({m.deviceName})</span>
+                  )}
+                  <span className="font-mono text-[10px] uppercase text-slate-500">
+                    {m.editingKey ? `Editing ${m.editingKey}` : m.activeView}
+                  </span>
+                </span>
+              ))
+            )}
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            {activityLog[0] && (
+              <span className="hidden lg:inline text-slate-600 truncate max-w-md" title={activityLog[0].summary}>
+                Latest edit: <strong className="text-slate-800">{activityLog[0].actorName}</strong> · {activityLog[0].summary}
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1 border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-medium text-emerald-800">
+              <Check className="h-3 w-3" />
+              Auto-Save Active
+            </span>
+          </div>
+        </div>
+
         {/* Toast Feedback */}
         {toast && (
           <div className="no-print fixed bottom-5 right-5 z-50 max-w-sm border px-4 py-3 text-xs font-medium shadow-md bg-white border-slate-300 text-slate-900">
@@ -847,6 +894,7 @@ export default function App() {
               drafts={drafts}
               activeBusinessId={activeBusinessId}
               onChangeBusiness={setActiveBusinessId}
+              onEditingChange={setEditingKey}
               onOpenInventoryAddOther={handleOpenAddOtherEquipment}
               onNotify={notify}
               onOpenPrint={setPrintPayload}

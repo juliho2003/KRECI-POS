@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Ban, CheckCircle2, ClipboardCheck, CreditCard, FileText, Pencil, Search, Truck, X } from 'lucide-react';
 import type { BusinessUnit, PresenceMember, Rental, RentalStatus } from '../types';
 import { apiFetch } from '../utils/api';
@@ -77,6 +77,9 @@ export function RentalsView({
   const [payMethod, setPayMethod] = useState('Cash');
   const [payRef, setPayRef] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [lastSavedTime, setLastSavedTime] = useState('');
+  const editSnapshotRef = useRef('');
 
   const businessMap = useMemo(() => {
     const map = new Map<string, BusinessUnit>();
@@ -113,47 +116,129 @@ export function RentalsView({
     setEditCrew(r.deliveryPersonnel);
     setEditDriver(r.vehicleDriver);
     setEditConditionOut(r.conditionUponRelease);
+    editSnapshotRef.current = JSON.stringify({
+      borrowerName: r.borrowerName.trim(),
+      organization: r.organization,
+      contactNo: r.contactNo,
+      eventPurpose: r.eventPurpose,
+      venue: r.venue,
+      dateOut: r.dateOut,
+      expectedReturn: r.expectedReturn,
+      deliveryPersonnel: r.deliveryPersonnel,
+      vehicleDriver: r.vehicleDriver,
+      conditionUponRelease: r.conditionUponRelease,
+    });
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     onEditingChange(`rental:${r.slipNo}`);
   };
 
   const closeEditRental = () => {
     setEditingRental(null);
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     onEditingChange(null);
   };
 
-  const handleSaveEditRental = async () => {
-    if (!editingRental || !editBorrower.trim()) {
-      onNotify('Borrower name is required.', 'error');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const res = await apiFetch(`/api/rentals/${editingRental.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          borrowerName: editBorrower.trim(),
-          organization: editOrg,
-          contactNo: editContact,
-          eventPurpose: editEvent,
-          venue: editVenue,
-          dateOut: editDateOut,
-          expectedReturn: editExpectedReturn,
-          deliveryPersonnel: editCrew,
-          vehicleDriver: editDriver,
-          conditionUponRelease: editConditionOut,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to update rental');
-      onNotify(`Saved updates for ${editingRental.slipNo}.`);
-      closeEditRental();
-      onRefresh();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const persistRentalEdit = useCallback(
+    async (closeAfter: boolean) => {
+      if (!editingRental) return;
+      if (!editBorrower.trim()) {
+        if (closeAfter) onNotify('Borrower name is required.', 'error');
+        return;
+      }
+      const payload = {
+        borrowerName: editBorrower.trim(),
+        organization: editOrg,
+        contactNo: editContact,
+        eventPurpose: editEvent,
+        venue: editVenue,
+        dateOut: editDateOut,
+        expectedReturn: editExpectedReturn,
+        deliveryPersonnel: editCrew,
+        vehicleDriver: editDriver,
+        conditionUponRelease: editConditionOut,
+      };
+      const serialized = JSON.stringify(payload);
+      if (serialized === editSnapshotRef.current) {
+        if (closeAfter) closeEditRental();
+        return;
+      }
+      if (closeAfter) setSubmitting(true);
+      setAutoSaveStatus('saving');
+      try {
+        const res = await apiFetch(`/api/rentals/${editingRental.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update rental');
+        editSnapshotRef.current = serialized;
+        setAutoSaveStatus('saved');
+        setLastSavedTime(new Date().toLocaleTimeString());
+        onRefresh();
+        if (closeAfter) {
+          onNotify(`Saved updates for ${editingRental.slipNo}.`);
+          closeEditRental();
+        }
+      } catch (err) {
+        setAutoSaveStatus('error');
+        if (closeAfter) onNotify((err as Error).message, 'error');
+      } finally {
+        if (closeAfter) setSubmitting(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      editingRental,
+      editBorrower,
+      editOrg,
+      editContact,
+      editEvent,
+      editVenue,
+      editDateOut,
+      editExpectedReturn,
+      editCrew,
+      editDriver,
+      editConditionOut,
+    ]
+  );
+
+  useEffect(() => {
+    if (!editingRental || !editBorrower.trim()) return;
+    const currentSnapshot = JSON.stringify({
+      borrowerName: editBorrower.trim(),
+      organization: editOrg,
+      contactNo: editContact,
+      eventPurpose: editEvent,
+      venue: editVenue,
+      dateOut: editDateOut,
+      expectedReturn: editExpectedReturn,
+      deliveryPersonnel: editCrew,
+      vehicleDriver: editDriver,
+      conditionUponRelease: editConditionOut,
+    });
+    if (currentSnapshot === editSnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistRentalEdit(false);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingRental,
+    editBorrower,
+    editOrg,
+    editContact,
+    editEvent,
+    editVenue,
+    editDateOut,
+    editExpectedReturn,
+    editCrew,
+    editDriver,
+    editConditionOut,
+    persistRentalEdit,
+  ]);
+
+  const handleSaveEditRental = () => persistRentalEdit(true);
 
   const handleCancelReservation = async (r: Rental) => {
     setSubmitting(true);
@@ -521,10 +606,22 @@ export function RentalsView({
           <div className="w-full max-w-lg bg-white border border-slate-200 shadow-lg my-6">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
               <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Edit Rental Details — {editingRental.slipNo}
-                </h3>
-                <p className="text-xs text-slate-500">{editingRental.drNo} · Status: {editingRental.status}</p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Edit Rental Details — {editingRental.slipNo}
+                  </h3>
+                  {autoSaveStatus === 'saving' && (
+                    <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                      Auto-saving...
+                    </span>
+                  )}
+                  {autoSaveStatus === 'saved' && (
+                    <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                      Auto-saved {lastSavedTime}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500">{editingRental.drNo} · Status: {editingRental.status} · Auto-saves online</p>
               </div>
               <button
                 type="button"
@@ -650,7 +747,7 @@ export function RentalsView({
                   onClick={closeEditRental}
                   className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  Close
                 </button>
                 <button
                   type="button"
@@ -658,7 +755,7 @@ export function RentalsView({
                   onClick={handleSaveEditRental}
                   className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
                 >
-                  Save Details
+                  Save &amp; Close
                 </button>
               </div>
             </div>

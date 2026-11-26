@@ -2607,16 +2607,51 @@ export function updateServerSettings(patch: {
   return { serverLabel: next.serverLabel, teamPinEnabled: next.teamPinEnabled };
 }
 
+let lastAutoSaveTimestamp = '';
+
+export function writeAutoSaveSnapshotFile(): string {
+  const now = new Date().toISOString();
+  lastAutoSaveTimestamp = now;
+  if (db.isServerless) {
+    return now;
+  }
+  try {
+    const targetDir = path.dirname(db.getDbPath());
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    const autoSaveFile = path.join(targetDir, 'kr_oncue_autosave.json');
+    const tmpFile = `${autoSaveFile}.tmp`;
+    const payload = exportFullBackup();
+    fs.writeFileSync(tmpFile, JSON.stringify(payload), 'utf8');
+    fs.renameSync(tmpFile, autoSaveFile);
+  } catch {
+    // ignore non-critical local auto-save file errors in read-only environments
+  }
+  return now;
+}
+
 export function getDatabaseStats() {
   const dbPath = db.getDbPath();
   const dbSizeBytes = db.getSizeBytes();
   let lastSavedAt = new Date().toISOString();
+  let autoSavePath = db.isServerless
+    ? 'Netlify Blobs (Auto-Persisted)'
+    : path.join(path.dirname(dbPath), 'kr_oncue_autosave.json');
+  let lastAutoSaveAt = lastAutoSaveTimestamp || lastSavedAt;
+
   if (!db.isServerless) {
     try {
       const st = fs.statSync(dbPath);
       lastSavedAt = st.mtime.toISOString();
     } catch {
       // ignore stat errors
+    }
+    try {
+      const autoSt = fs.statSync(autoSavePath);
+      lastAutoSaveAt = autoSt.mtime.toISOString();
+    } catch {
+      // ignore if autosave json hasn't been written yet
     }
   }
 
@@ -2627,6 +2662,8 @@ export function getDatabaseStats() {
     dbPath,
     dbSizeBytes,
     lastSavedAt,
+    lastAutoSaveAt,
+    autoSavePath,
     counts: {
       inventory: countOf('inventory'),
       clients: countOf('clients'),

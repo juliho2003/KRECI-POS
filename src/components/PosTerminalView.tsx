@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FolderOpen, Image as ImageIcon, Minus, Plus, Save, Search, Trash2 } from 'lucide-react';
 import type {
   BusinessUnit,
@@ -28,6 +28,7 @@ interface PosTerminalViewProps {
   activeBusinessId: string;
   onChangeBusiness: (businessId: string) => void;
   onOpenInventoryAddOther: () => void;
+  onEditingChange?: (key: string | null) => void;
   onNotify: (msg: string, type?: 'success' | 'error') => void;
   onOpenPrint: (payload: PrintablePayload) => void;
   onTransactionDone: () => void;
@@ -78,6 +79,7 @@ export function PosTerminalView({
   activeBusinessId,
   onChangeBusiness,
   onOpenInventoryAddOther,
+  onEditingChange,
   onNotify,
   onOpenPrint,
   onTransactionDone,
@@ -107,6 +109,9 @@ export function PosTerminalView({
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [draftAutoSaveStatus, setDraftAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [draftLastSavedTime, setDraftLastSavedTime] = useState('');
+  const draftSnapshotRef = useRef('');
 
   const businessMap = useMemo(() => {
     const map = new Map<string, BusinessUnit>();
@@ -191,7 +196,72 @@ export function PosTerminalView({
   const grandTotal = Math.max(0, subtotal - discountAmt + deliveryCharge);
   const balanceDue = Math.max(0, grandTotal - depositAdvance);
 
+  const buildDraftPayload = useCallback(() => {
+    const title =
+      draftTitle.trim() ||
+      eventName.trim() ||
+      (clientName.trim() ? `${clientName.trim()} Order` : 'Live Team Draft');
+    return {
+      businessId: effectiveBusinessId,
+      title,
+      clientId: selectedClientId ? Number(selectedClientId) : null,
+      clientName,
+      organization,
+      contactNo,
+      eventName,
+      venue,
+      dateOut,
+      expectedReturn,
+      days,
+      deliveryCharge,
+      discountPercent,
+      depositAdvance,
+      paymentMethod,
+      notes,
+      items: cart.map((l) => ({
+        inventoryCode: l.item.code,
+        equipmentName: l.item.name,
+        quantity: l.quantity,
+        rentalRate: l.rentalRate,
+        remarks: l.remarks,
+      })),
+    };
+  }, [
+    draftTitle,
+    eventName,
+    clientName,
+    effectiveBusinessId,
+    selectedClientId,
+    organization,
+    contactNo,
+    venue,
+    dateOut,
+    expectedReturn,
+    days,
+    deliveryCharge,
+    discountPercent,
+    depositAdvance,
+    paymentMethod,
+    notes,
+    cart,
+  ]);
+
+  useEffect(() => {
+    if (!onEditingChange) return;
+    if (activeDraftId) {
+      onEditingChange(`pos:draft-${activeDraftId}`);
+    } else if (cart.length > 0 || clientName.trim() || eventName.trim()) {
+      onEditingChange('pos:new-order');
+    } else {
+      onEditingChange(null);
+    }
+    return () => onEditingChange(null);
+  }, [activeDraftId, cart.length, clientName, eventName, onEditingChange]);
+
   const resetCart = () => {
+    draftSnapshotRef.current = '';
+    setDraftAutoSaveStatus('idle');
+    setDraftLastSavedTime('');
     setActiveDraftId(null);
     setDraftTitle('');
     setCart([]);
@@ -207,62 +277,100 @@ export function PosTerminalView({
     setNotes('');
   };
 
-  const handleSaveSharedDraft = async () => {
-    if (cart.length === 0 && !clientName.trim() && !eventName.trim()) {
-      onNotify('Add gear or event info before saving a shared draft.', 'error');
-      return;
-    }
-    const title =
-      draftTitle.trim() ||
-      eventName.trim() ||
-      (clientName.trim() ? `${clientName.trim()} Order` : `Team Draft ${new Date().toLocaleTimeString()}`);
-    setSubmitting(true);
-    try {
-      const payload = {
-        businessId: effectiveBusinessId,
-        title,
-        clientId: selectedClientId ? Number(selectedClientId) : null,
-        clientName,
-        organization,
-        contactNo,
-        eventName,
-        venue,
-        dateOut,
-        expectedReturn,
-        days,
-        deliveryCharge,
-        discountPercent,
-        depositAdvance,
-        paymentMethod,
-        notes,
-        items: cart.map((l) => ({
-          inventoryCode: l.item.code,
-          equipmentName: l.item.name,
-          quantity: l.quantity,
-          rentalRate: l.rentalRate,
-          remarks: l.remarks,
-        })),
-      };
-      const url = activeDraftId ? `/api/drafts/${activeDraftId}` : '/api/drafts';
-      const method = activeDraftId ? 'PATCH' : 'POST';
-      const res = await apiFetch(url, { method, body: JSON.stringify(payload) });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to save shared draft');
-      setActiveDraftId(data.id);
-      setDraftTitle(data.title);
-      onNotify(`Saved shared team draft "${data.title}". Teammates can open & edit it now.`);
-      onTransactionDone();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const persistDraft = useCallback(
+    async (manual: boolean) => {
+      if (cart.length === 0 && !clientName.trim() && !eventName.trim()) {
+        if (manual) onNotify('Add gear or event info before saving a shared draft.', 'error');
+        return;
+      }
+      const payload = buildDraftPayload();
+      const serialized = JSON.stringify(payload);
+      if (!manual && serialized === draftSnapshotRef.current) return;
+
+      if (manual) setSubmitting(true);
+      setDraftAutoSaveStatus('saving');
+      try {
+        const url = activeDraftId ? `/api/drafts/${activeDraftId}` : '/api/drafts';
+        const method = activeDraftId ? 'PATCH' : 'POST';
+        const res = await apiFetch(url, { method, body: serialized });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to save shared draft');
+        draftSnapshotRef.current = serialized;
+        setActiveDraftId(data.id);
+        setDraftTitle(data.title);
+        setDraftAutoSaveStatus('saved');
+        setDraftLastSavedTime(new Date().toLocaleTimeString());
+        onTransactionDone();
+        if (manual) {
+          onNotify(`Saved shared team draft "${data.title}". Teammates can open & edit it now.`);
+        }
+      } catch (err) {
+        setDraftAutoSaveStatus('error');
+        if (manual) onNotify((err as Error).message, 'error');
+      } finally {
+        if (manual) setSubmitting(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeDraftId, buildDraftPayload, cart.length, clientName, eventName]
+  );
+
+  useEffect(() => {
+    if (submitting) return;
+    if (cart.length === 0 && !clientName.trim() && !eventName.trim()) return;
+    const serialized = JSON.stringify(buildDraftPayload());
+    if (serialized === draftSnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistDraft(false);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [submitting, cart.length, clientName, eventName, buildDraftPayload, persistDraft]);
+
+  const handleSaveSharedDraft = () => persistDraft(true);
 
   const handleLoadDraft = (d: SharedDraft) => {
     if (d.businessId && businessMap.has(d.businessId)) {
       onChangeBusiness(d.businessId);
     }
+    const loadedCart: CartLine[] = [];
+    for (const it of d.items) {
+      const inv = inventory.find((x) => x.code === it.inventoryCode);
+      if (inv) {
+        loadedCart.push({
+          item: inv,
+          quantity: it.quantity,
+          rentalRate: it.rentalRate,
+          remarks: it.remarks || '',
+        });
+      }
+    }
+    draftSnapshotRef.current = JSON.stringify({
+      businessId: d.businessId || effectiveBusinessId,
+      title: d.title,
+      clientId: d.clientId ?? null,
+      clientName: d.clientName,
+      organization: d.organization,
+      contactNo: d.contactNo,
+      eventName: d.eventName,
+      venue: d.venue,
+      dateOut: d.dateOut || getTodayISO(),
+      expectedReturn: d.expectedReturn || getTodayISO(),
+      days: d.days || 1,
+      deliveryCharge: d.deliveryCharge || 0,
+      discountPercent: d.discountPercent || 0,
+      depositAdvance: d.depositAdvance || 0,
+      paymentMethod: d.paymentMethod || 'Cash',
+      notes: d.notes || '',
+      items: loadedCart.map((l) => ({
+        inventoryCode: l.item.code,
+        equipmentName: l.item.name,
+        quantity: l.quantity,
+        rentalRate: l.rentalRate,
+        remarks: l.remarks,
+      })),
+    });
+    setDraftAutoSaveStatus('saved');
+    setDraftLastSavedTime(new Date().toLocaleTimeString());
     setActiveDraftId(d.id);
     setDraftTitle(d.title);
     setSelectedClientId(d.clientId ? String(d.clientId) : '');
@@ -279,18 +387,6 @@ export function PosTerminalView({
     setDepositAdvance(d.depositAdvance || 0);
     setPaymentMethod(d.paymentMethod || 'Cash');
     setNotes(d.notes || '');
-    const loadedCart: CartLine[] = [];
-    for (const it of d.items) {
-      const inv = inventory.find((x) => x.code === it.inventoryCode);
-      if (inv) {
-        loadedCart.push({
-          item: inv,
-          quantity: it.quantity,
-          rentalRate: it.rentalRate,
-          remarks: it.remarks || '',
-        });
-      }
-    }
     setCart(loadedCart);
     setShowDraftsBar(false);
     onNotify(`Loaded shared draft "${d.title}".`);
@@ -301,6 +397,9 @@ export function PosTerminalView({
       const res = await apiFetch(`/api/drafts/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete draft');
       if (activeDraftId === id) {
+        draftSnapshotRef.current = '';
+        setDraftAutoSaveStatus('idle');
+        setDraftLastSavedTime('');
         setActiveDraftId(null);
         setDraftTitle('');
       }
@@ -351,6 +450,9 @@ export function PosTerminalView({
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to create quote');
+      if (activeDraftId) {
+        apiFetch(`/api/drafts/${activeDraftId}`, { method: 'DELETE' }).catch(() => {});
+      }
       onNotify(`Quotation ${(data as Quote).quoteNo} generated for ${effectiveBusiness?.name || effectiveBusinessId}.`);
       onOpenPrint({ kind: 'quote', data });
       resetCart();
@@ -419,6 +521,9 @@ export function PosTerminalView({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to create rental');
       const rental = data as Rental;
+      if (activeDraftId) {
+        apiFetch(`/api/drafts/${activeDraftId}`, { method: 'DELETE' }).catch(() => {});
+      }
       onNotify(
         mode === 'DISPATCHED'
           ? `Dispatched ${rental.slipNo} (${rental.drNo}). Inventory updated.`
@@ -680,9 +785,21 @@ export function PosTerminalView({
                   {effectiveBusiness ? `${effectiveBusiness.name} POS` : 'Active Transaction'}
                 </h2>
               </div>
-              <p className="text-xs text-slate-500">
-                {cart.length} line item(s) · {activeDraftId ? `Draft: ${draftTitle}` : 'Build Quote or Borrowers Slip'}
-              </p>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span>
+                  {cart.length} line item(s) · {activeDraftId ? `Draft: ${draftTitle}` : 'Build Quote or Borrowers Slip'}
+                </span>
+                {draftAutoSaveStatus === 'saving' && (
+                  <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                    Auto-saving...
+                  </span>
+                )}
+                {draftAutoSaveStatus === 'saved' && (
+                  <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                    Auto-saved draft {draftLastSavedTime}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <button

@@ -66,6 +66,7 @@ import {
   updateServerSettings,
   updateServerUser,
   updateSharedDraft,
+  writeAutoSaveSnapshotFile,
 } from './db.ts';
 import type http from 'http';
 import type { PresenceMember, RealtimeEventType, RealtimeMessage, ServerUser } from '../src/types.ts';
@@ -153,7 +154,53 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
     next();
   });
 
-  const broadcast = options.broadcast ?? (() => {});
+  const rawBroadcast = options.broadcast ?? (() => {});
+  let syncRevision = 1;
+  let lastSyncEvent: {
+    type: RealtimeEventType;
+    actor: string;
+    detail?: string;
+    timestamp: string;
+  } | null = null;
+
+  const DATA_MUTATION_TYPES = new Set<RealtimeEventType>([
+    'inventory:updated',
+    'client:updated',
+    'quote:updated',
+    'rental:updated',
+    'payment:updated',
+    'maintenance:updated',
+    'budget:updated',
+    'draft:updated',
+    'business:updated',
+    'settings:updated',
+    'server:saved',
+  ]);
+
+  const broadcast = (type: RealtimeEventType, detail?: string, extra?: Partial<RealtimeMessage>) => {
+    const latestAct = type !== 'presence:updated' ? getActivityLog(1)[0] : undefined;
+    const actorName = extra?.actor || latestAct?.actorName || 'Team Member';
+    if (type !== 'presence:updated') {
+      syncRevision += 1;
+      if (type !== 'activity:updated' || !lastSyncEvent) {
+        lastSyncEvent = {
+          type,
+          actor: actorName,
+          detail: latestAct?.summary || detail,
+          timestamp: new Date().toISOString(),
+        };
+      }
+      if (DATA_MUTATION_TYPES.has(type)) {
+        writeAutoSaveSnapshotFile();
+      }
+    }
+    rawBroadcast(type, detail, {
+      ...extra,
+      actor: actorName,
+      revision: syncRevision,
+    });
+  };
+
   const broadcastPresence = options.broadcastPresence ?? (() => {});
   const getOnlineMembers = (): PresenceMember[] => {
     if (options.getOnlineMembers) {
@@ -232,22 +279,14 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
           ? getServerUserByClientId(clientIdHeader)
           : undefined;
 
-    if (userRecord) {
-      if (userRecord.status === 'REVOKED') {
-        res.status(403).json({
-          error: `Access for ${userRecord.name} has been revoked by the server owner.`,
-        });
-        return;
-      }
-      if (!userRecord.canEdit || userRecord.accessLevel === 'VIEWER') {
-        res.status(403).json({
-          error: `${userRecord.name} currently has View-Only access on this server.`,
-        });
-        return;
-      }
+    if (userRecord && userRecord.status === 'REVOKED') {
+      res.status(403).json({
+        error: `Access for ${userRecord.name} has been revoked by the server owner.`,
+      });
+      return;
     }
 
-    // No general Team PIN required for regular edits; only server savepoints require PIN 2022
+    // All online active devices using the application URL can make changes; only Server Savepoints require PIN 2022
     next();
   });
 
@@ -326,15 +365,32 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
     }
   });
 
+  app.get('/api/sync-state', (_req, res) => {
+    try {
+      res.json({
+        revision: syncRevision,
+        lastEvent: lastSyncEvent,
+        onlineMembers: getOnlineMembers(),
+        serverUsers: getEnrichedServerUsers(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   app.get('/api/server-info', (req, res) => {
     try {
       const settings = getServerSettings();
       const stats = getDatabaseStats();
-      const proto = req.header('x-forwarded-proto') || req.protocol || 'https';
-      const host = req.header('host') || '';
+      const proto = String(req.header('x-forwarded-proto') || req.protocol || 'https')
+        .split(',')[0]
+        .trim();
+      const host = String(req.header('x-forwarded-host') || req.header('host') || '')
+        .split(',')[0]
+        .trim();
       const inferredUrl = host ? `${proto}://${host}` : '';
       const publicAppUrl =
-        process.env.URL || process.env.DEPLOY_PRIME_URL || process.env.APP_URL || inferredUrl;
+        inferredUrl || process.env.URL || process.env.DEPLOY_PRIME_URL || process.env.APP_URL || '';
 
       res.json({
         serverLabel: settings.serverLabel,
@@ -345,13 +401,16 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
         port: options.port,
         platform: options.runtime === 'netlify' ? 'Netlify Functions (Serverless)' : `${os.platform()} ${os.arch()}`,
         uptimeSeconds: Math.floor((Date.now() - options.serverStartTime) / 1000),
-        lanUrls: options.getLanUrls ? options.getLanUrls(options.port) : [],
+        lanUrls: [],
         publicAppUrl,
         dbPath: stats.dbPath,
         dbSizeBytes: stats.dbSizeBytes,
         lastSavedAt: stats.lastSavedAt,
+        lastAutoSaveAt: stats.lastAutoSaveAt,
+        autoSavePath: stats.autoSavePath,
         lastManualSaveAt: settings.lastManualSaveAt,
         lastManualSaveBy: settings.lastManualSaveBy,
+        revision: syncRevision,
         counts: stats.counts,
         onlineMembers: getOnlineMembers(),
       });
@@ -471,8 +530,8 @@ export function createApiApp(options: CreateApiAppOptions): express.Express {
   });
 
   app.get('/api/apple/openapi.json', (req, res) => {
-    const proto = req.header('x-forwarded-proto') || req.protocol || 'https';
-    const host = req.header('host') || `localhost:${options.port}`;
+    const proto = String(req.header('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+    const host = String(req.header('x-forwarded-host') || req.header('host') || `localhost:${options.port}`).split(',')[0].trim();
     const serverUrl = `${proto}://${host}`;
     res.json({
       openapi: '3.0.3',

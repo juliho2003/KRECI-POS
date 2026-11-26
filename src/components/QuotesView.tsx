@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRightCircle, Minus, Pencil, Plus, Printer, Search, Trash2, X } from 'lucide-react';
 import type { BusinessUnit, InventoryItem, PresenceMember, Quote, QuoteStatus, Rental } from '../types';
 import { apiFetch } from '../utils/api';
@@ -62,6 +62,9 @@ export function QuotesView({
   const [editNotes, setEditNotes] = useState('');
   const [editItems, setEditItems] = useState<EditQuoteLine[]>([]);
   const [addItemCode, setAddItemCode] = useState('');
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [lastSavedTime, setLastSavedTime] = useState('');
+  const editSnapshotRef = useRef('');
 
   const businessMap = useMemo(() => {
     const map = new Map<string, BusinessUnit>();
@@ -86,6 +89,13 @@ export function QuotesView({
   }, [quotes, search, businessFilter, statusFilter]);
 
   const openEditQuote = (qt: Quote) => {
+    const mappedItems = qt.items.map((it) => ({
+      inventoryCode: it.inventoryCode,
+      equipmentName: it.equipmentName,
+      quantity: it.quantity,
+      rentalRate: it.rentalRate,
+      remarks: it.remarks,
+    }));
     setEditingQuote(qt);
     setEditClientName(qt.clientName);
     setEditOrg(qt.organization);
@@ -98,69 +108,153 @@ export function QuotesView({
     setEditDelivery(qt.deliveryCharge);
     setEditDiscount(qt.discountPercent);
     setEditNotes(qt.notes);
-    setEditItems(
-      qt.items.map((it) => ({
-        inventoryCode: it.inventoryCode,
-        equipmentName: it.equipmentName,
-        quantity: it.quantity,
-        rentalRate: it.rentalRate,
-        remarks: it.remarks,
-      }))
-    );
+    setEditItems(mappedItems);
     setAddItemCode(inventory[0]?.code ?? '');
+    editSnapshotRef.current = JSON.stringify({
+      clientName: qt.clientName.trim(),
+      organization: qt.organization,
+      contactNo: qt.contactNo,
+      eventName: qt.eventName,
+      venue: qt.venue,
+      eventDate: qt.eventDate,
+      expectedReturnDate: qt.expectedReturnDate,
+      days: qt.days,
+      deliveryCharge: qt.deliveryCharge,
+      discountPercent: qt.discountPercent,
+      notes: qt.notes,
+      items: mappedItems,
+    });
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     onEditingChange(`quote:${qt.quoteNo}`);
   };
 
   const closeEditQuote = () => {
     setEditingQuote(null);
+    setAutoSaveStatus('idle');
+    setLastSavedTime('');
     onEditingChange(null);
   };
 
-  const handleSaveEditQuote = async () => {
-    if (!editingQuote) return;
-    if (!editClientName.trim() || editItems.length === 0) {
-      onNotify('Client name and at least one item are required.', 'error');
-      return;
-    }
-    setSubmitting(true);
-    try {
-      const res = await apiFetch(`/api/quotes/${editingQuote.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          clientId: editingQuote.clientId,
-          clientName: editClientName.trim(),
-          organization: editOrg,
-          contactNo: editContact,
-          eventName: editEvent,
-          venue: editVenue,
-          eventDate: editEventDate,
-          expectedReturnDate: editReturnDate,
-          days: editDays,
-          deliveryCharge: editDelivery,
-          discountPercent: editDiscount,
-          notes: editNotes,
-          status: editingQuote.status,
-          items: editItems.map((it) => ({
-            inventoryCode: it.inventoryCode,
-            equipmentName: it.equipmentName,
-            quantity: it.quantity,
-            rentalRate: it.rentalRate,
-            days: editDays,
-            remarks: it.remarks,
-          })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to update quote');
-      onNotify(`Saved edits to ${editingQuote.quoteNo}.`);
-      closeEditQuote();
-      onRefresh();
-    } catch (err) {
-      onNotify((err as Error).message, 'error');
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  const persistQuoteEdit = useCallback(
+    async (closeAfter: boolean) => {
+      if (!editingQuote) return;
+      if (!editClientName.trim() || editItems.length === 0) {
+        if (closeAfter) onNotify('Client name and at least one item are required.', 'error');
+        return;
+      }
+      const snapshotObj = {
+        clientName: editClientName.trim(),
+        organization: editOrg,
+        contactNo: editContact,
+        eventName: editEvent,
+        venue: editVenue,
+        eventDate: editEventDate,
+        expectedReturnDate: editReturnDate,
+        days: editDays,
+        deliveryCharge: editDelivery,
+        discountPercent: editDiscount,
+        notes: editNotes,
+        items: editItems,
+      };
+      const serialized = JSON.stringify(snapshotObj);
+      if (serialized === editSnapshotRef.current) {
+        if (closeAfter) closeEditQuote();
+        return;
+      }
+      if (closeAfter) setSubmitting(true);
+      setAutoSaveStatus('saving');
+      try {
+        const res = await apiFetch(`/api/quotes/${editingQuote.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            clientId: editingQuote.clientId,
+            ...snapshotObj,
+            status: editingQuote.status,
+            items: editItems.map((it) => ({
+              inventoryCode: it.inventoryCode,
+              equipmentName: it.equipmentName,
+              quantity: it.quantity,
+              rentalRate: it.rentalRate,
+              days: editDays,
+              remarks: it.remarks,
+            })),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to update quote');
+        editSnapshotRef.current = serialized;
+        setAutoSaveStatus('saved');
+        setLastSavedTime(new Date().toLocaleTimeString());
+        onRefresh();
+        if (closeAfter) {
+          onNotify(`Saved edits to ${editingQuote.quoteNo}.`);
+          closeEditQuote();
+        }
+      } catch (err) {
+        setAutoSaveStatus('error');
+        if (closeAfter) onNotify((err as Error).message, 'error');
+      } finally {
+        if (closeAfter) setSubmitting(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      editingQuote,
+      editClientName,
+      editOrg,
+      editContact,
+      editEvent,
+      editVenue,
+      editEventDate,
+      editReturnDate,
+      editDays,
+      editDelivery,
+      editDiscount,
+      editNotes,
+      editItems,
+    ]
+  );
+
+  useEffect(() => {
+    if (!editingQuote || !editClientName.trim() || editItems.length === 0) return;
+    const currentSnapshot = JSON.stringify({
+      clientName: editClientName.trim(),
+      organization: editOrg,
+      contactNo: editContact,
+      eventName: editEvent,
+      venue: editVenue,
+      eventDate: editEventDate,
+      expectedReturnDate: editReturnDate,
+      days: editDays,
+      deliveryCharge: editDelivery,
+      discountPercent: editDiscount,
+      notes: editNotes,
+      items: editItems,
+    });
+    if (currentSnapshot === editSnapshotRef.current) return;
+    const timer = window.setTimeout(() => {
+      void persistQuoteEdit(false);
+    }, 750);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingQuote,
+    editClientName,
+    editOrg,
+    editContact,
+    editEvent,
+    editVenue,
+    editEventDate,
+    editReturnDate,
+    editDays,
+    editDelivery,
+    editDiscount,
+    editNotes,
+    editItems,
+    persistQuoteEdit,
+  ]);
+
+  const handleSaveEditQuote = () => persistQuoteEdit(true);
 
   const handleDeleteQuote = async (qt: Quote) => {
     try {
@@ -424,10 +518,22 @@ export function QuotesView({
           <div className="w-full max-w-3xl bg-white border border-slate-200 shadow-xl my-6">
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
               <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Edit Quotation — {editingQuote.quoteNo}
-                </h3>
-                <p className="text-xs text-slate-500">All updates sync immediately across the team</p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-sm font-semibold text-slate-900">
+                    Edit Quotation — {editingQuote.quoteNo}
+                  </h3>
+                  {autoSaveStatus === 'saving' && (
+                    <span className="text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+                      Auto-saving...
+                    </span>
+                  )}
+                  {autoSaveStatus === 'saved' && (
+                    <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5">
+                      Auto-saved {lastSavedTime}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500">All edits auto-save &amp; sync across online devices</p>
               </div>
               <button
                 type="button"
@@ -690,7 +796,7 @@ export function QuotesView({
                   onClick={closeEditQuote}
                   className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 cursor-pointer"
                 >
-                  Cancel
+                  Close
                 </button>
                 <button
                   type="button"
@@ -698,7 +804,7 @@ export function QuotesView({
                   onClick={handleSaveEditQuote}
                   className="bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 cursor-pointer"
                 >
-                  Save Quotation
+                  Save &amp; Close
                 </button>
               </div>
             </div>
